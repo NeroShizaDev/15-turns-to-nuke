@@ -1,4 +1,4 @@
-import { areNeighbors } from '../lib/gameData.js';
+import { ARTILLERY_RANGE, areNeighbors, isInRange } from '../lib/gameData.js';
 import Cell from './Cell.jsx';
 
 const getDisplay = (cell, activePlayer, mode) => {
@@ -26,7 +26,28 @@ const getDisplay = (cell, activePlayer, mode) => {
   return { state: 'unknown', content: null };
 };
 
-export default function GameGrid({ title, mode, grid, activePlayer, selectedCell, onCellClick }) {
+const canActOnCell = ({ mode, cell, grid, selectedCell, buildMode }) => {
+  if (buildMode) {
+    if (mode !== 'own') return false;
+    const hasRecruiterNear = grid.some((candidate) => candidate.content
+      && (candidate.content.type === 'base' || candidate.content.type === 'hq')
+      && areNeighbors(candidate.id, cell.id));
+    return !cell.content && hasRecruiterNear;
+  }
+
+  if (selectedCell === null) return false;
+
+  const selectedContent = grid[selectedCell]?.content;
+  if (!selectedContent) return false;
+
+  if (selectedContent.type === 'artillery') {
+    return mode === 'enemy' && selectedCell !== cell.id && isInRange(selectedCell, cell.id, ARTILLERY_RANGE);
+  }
+
+  return mode === 'own' && areNeighbors(selectedCell, cell.id) && !cell.content;
+};
+
+export default function GameGrid({ title, mode, grid, activePlayer, selectedCell, buildMode, onCellClick }) {
   return (
     <section>
       <h3 className="mb-2 text-center text-xs font-bold uppercase tracking-[0.35em] text-blue-950">
@@ -35,7 +56,7 @@ export default function GameGrid({ title, mode, grid, activePlayer, selectedCell
       <div className={`grid grid-cols-10 overflow-hidden border-2 ${mode === 'enemy' ? 'border-red-300' : 'border-blue-400'} bg-white/75 shadow-inner`}>
         {grid.map((cell) => {
           const selected = selectedCell === cell.id;
-          const movable = mode === 'own' && selectedCell !== null && areNeighbors(selectedCell, cell.id) && !cell.content;
+          const actionable = canActOnCell({ mode, cell, grid, selectedCell, buildMode });
 
           return (
             <Cell
@@ -43,8 +64,9 @@ export default function GameGrid({ title, mode, grid, activePlayer, selectedCell
               cell={cell}
               display={getDisplay(cell, activePlayer, mode)}
               selected={selected}
-              movable={movable}
-              onClick={onCellClick}
+              actionable={actionable}
+              onClick={(id) => onCellClick(id, mode)}
+              activePlayer={activePlayer}
             />
           );
         })}
