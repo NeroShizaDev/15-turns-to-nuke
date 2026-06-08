@@ -34,24 +34,30 @@ const cloneGrid = (grid) => grid.map((cell) => ({
   content: cell.content ? { ...cell.content } : null,
 }));
 
-const applySaboteurDetection = (grid, player, turn) => {
-  const enemy = getEnemy(player);
-  const viewKey = `${player}View`;
+const applySaboteurDetection = (grid, turn) => {
+  let updatedGrid = grid;
 
-  return grid.map((cell) => {
-    if (cell.content?.owner !== enemy || cell.content.type !== 'saboteur') return cell;
+  ['p1', 'p2'].forEach((player) => {
+    const enemy = getEnemy(player);
+    const enemyViewKey = `${enemy}View`;
 
-    const hasAllyAdjacent = grid.some((ally) => ally.content?.owner === player
-      && ally.content.kind === 'unit'
-      && areNeighbors(ally.id, cell.id));
+    updatedGrid = updatedGrid.map((cell) => {
+      if (cell.content?.owner !== player || cell.content.type !== 'saboteur') return cell;
 
-    if (!hasAllyAdjacent) return cell;
+      const hasEnemyAdjacent = updatedGrid.some((adjacent) => adjacent.content?.owner === enemy
+        && adjacent.content.kind === 'unit'
+        && areNeighbors(adjacent.id, cell.id));
 
-    return {
-      ...cell,
-      [viewKey]: { state: 'unit', type: 'saboteur', turnDetected: turn },
-    };
+      if (!hasEnemyAdjacent) return cell;
+
+      return {
+        ...cell,
+        [enemyViewKey]: { state: 'unit', type: 'saboteur', turnDetected: turn },
+      };
+    });
   });
+
+  return updatedGrid;
 };
 
 const appendLog = (state, message) => [
@@ -65,16 +71,22 @@ const makeUnit = (type, owner) => ({
   owner,
   ap: 1,
   cooldown: 0,
+  hasMoved: false,
   hidden: type === 'saboteur',
 });
 
+const normalizeTurn = (turn) => {
+  if (typeof turn === 'object') return 1;
+  return Number(turn) || 1;
+};
+
 const setKnownContent = (cell, player, content, turn = 1) => ({
   ...cell,
-  [`${player}View`]: { state: content.kind, type: content.type, turnDetected: turn },
+  [`${player}View`]: { state: content.kind, type: content.type, turnDetected: normalizeTurn(turn) },
 });
 
 const withContent = (grid, id, content) => {
-  grid[id] = setKnownContent({ ...grid[id], content }, content.owner, content);
+  grid[id] = setKnownContent({ ...grid[id], content }, content.owner, content, 1);
 };
 
 const createInitialGrid = () => {
@@ -121,6 +133,17 @@ const hasActiveRocketSilo = (grid, player) => grid.some(
 
 const canHireFrom = (cell, player) => cell.content?.owner === player
   && (cell.content.type === 'base' || cell.content.type === 'hq');
+
+const checkBaseWinCondition = (grid) => {
+  const hasP1Bases = grid.some((cell) => cell.content?.owner === 'p1'
+    && (cell.content.type === 'base' || cell.content.type === 'hq'));
+  const hasP2Bases = grid.some((cell) => cell.content?.owner === 'p2'
+    && (cell.content.type === 'base' || cell.content.type === 'hq'));
+
+  if (!hasP1Bases && hasP2Bases) return 'p2';
+  if (!hasP2Bases && hasP1Bases) return 'p1';
+  return null;
+};
 
 const isConfirmedTarget = (cell, player) => {
   const viewState = cell[`${player}View`].state;
@@ -254,7 +277,7 @@ export const useGameStore = create((set, get) => ({
     const unit = makeUnit(buildMode, activePlayer);
     newGrid[targetId] = setKnownContent({ ...newGrid[targetId], content: unit }, activePlayer, unit, get().turn);
 
-    const detectedGrid = applySaboteurDetection(newGrid, activePlayer, get().turn);
+    const detectedGrid = applySaboteurDetection(newGrid, get().turn);
 
     set((state) => ({
       grid: detectedGrid,
@@ -286,7 +309,7 @@ export const useGameStore = create((set, get) => ({
     newGrid[id] = revealTruthFor(newGrid[id], activePlayer, turn);
     newGrid[selectedCell].content.ap = 0;
 
-    const detectedGrid = applySaboteurDetection(newGrid, activePlayer, turn);
+    const detectedGrid = applySaboteurDetection(newGrid, turn);
 
     set((state) => ({
       grid: detectedGrid,
@@ -305,7 +328,7 @@ export const useGameStore = create((set, get) => ({
     if (fromCell.content.ap <= 0 || actionPoints[activePlayer] <= 0 || (fromCell.content.cooldown ?? 0) > 0) return;
     if (!areNeighbors(fromId, toId) || toCell.content) return;
 
-    const unit = { ...fromCell.content, ap: 0 };
+    const unit = { ...fromCell.content, ap: 0, hasMoved: true };
     const enemy = getEnemy(activePlayer);
     const enemyView = `${enemy}View`;
     const ownerView = `${activePlayer}View`;
@@ -328,7 +351,7 @@ export const useGameStore = create((set, get) => ({
       [ownerView]: { state: 'unit', type: unit.type, turnDetected: get().turn },
     };
 
-    const detectedGrid = applySaboteurDetection(newGrid, activePlayer, get().turn);
+    const detectedGrid = applySaboteurDetection(newGrid, get().turn);
 
     set((state) => ({
       grid: detectedGrid,
@@ -375,11 +398,16 @@ export const useGameStore = create((set, get) => ({
 
     if (newGrid[selectedCell].content) newGrid[selectedCell].content.ap = 0;
 
+    const newWinner = checkBaseWinCondition(newGrid);
+
     set((state) => ({
       grid: newGrid,
       selectedCell: null,
+      winner: newWinner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
-      log: appendLog(state, message),
+      log: appendLog(state, newWinner
+        ? `${playerName(newWinner)} побеждает, уничтожив все базы противника!`
+        : message),
     }));
   },
 
@@ -477,6 +505,10 @@ export const useGameStore = create((set, get) => ({
     if (!artilleryCell?.content || artilleryCell.content.owner !== activePlayer || artilleryCell.content.type !== 'artillery') return;
     if (artilleryCell.content.ap <= 0 || (artilleryCell.content.cooldown ?? 0) > 0) return;
     if (actionPoints[activePlayer] < ARTILLERY_ACTION_COST) return;
+    if (artilleryCell.content.hasMoved) {
+      set((state) => ({ log: appendLog(state, 'артиллерия не может стрелять после движения в этот ход.') }));
+      return;
+    }
     if (!isInRange(selectedCell, targetId, ARTILLERY_RANGE) || selectedCell === targetId) {
       set((state) => ({ log: appendLog(state, `артиллерия бьёт только в радиусе ${ARTILLERY_RANGE} клеток.`) }));
       return;
@@ -508,11 +540,16 @@ export const useGameStore = create((set, get) => ({
     newGrid[selectedCell].content.ap = 0;
     newGrid[selectedCell].content.cooldown = 2;
 
+    const newWinner = checkBaseWinCondition(newGrid);
+
     set((state) => ({
       grid: newGrid,
       selectedCell: null,
+      winner: newWinner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - ARTILLERY_ACTION_COST },
-      log: appendLog(state, message),
+      log: appendLog(state, newWinner
+        ? `${playerName(newWinner)} побеждает, уничтожив все базы противника!`
+        : message),
     }));
   },
 
@@ -533,6 +570,7 @@ export const useGameStore = create((set, get) => ({
           content: {
             ...cell.content,
             cooldown: nextCooldown,
+            hasMoved: false,
             ap: nextCooldown > 0 ? 0 : 1,
           },
         };
