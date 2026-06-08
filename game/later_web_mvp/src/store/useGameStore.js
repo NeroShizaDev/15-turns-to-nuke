@@ -15,6 +15,8 @@ import {
 } from '../lib/gameData.js';
 
 const playerName = (player) => (player === 'p1' ? 'Игрок 1' : 'Игрок 2');
+const BASE_INCOME = 5;
+const HQ_INCOME = 20;
 
 const cloneGrid = (grid) => grid.map((cell) => ({
   ...cell,
@@ -54,18 +56,17 @@ const createInitialGrid = () => {
   withContent(grid, 62, makeUnit('scout', 'p1'));
   withContent(grid, 83, makeUnit('engineer', 'p1'));
   withContent(grid, 73, makeUnit('artillery', 'p1'));
+  withContent(grid, 84, makeUnit('saboteur', 'p1'));
 
   withContent(grid, 18, { type: 'hq', kind: 'building', owner: 'p2', hp: 4 });
   withContent(grid, 8, { type: 'base', kind: 'building', owner: 'p2', hp: 2 });
   withContent(grid, 9, { type: 'rocketSilo', kind: 'building', owner: 'p2', hp: 3 });
   withContent(grid, 27, makeUnit('infantry', 'p2'));
   withContent(grid, 37, makeUnit('scout', 'p2'));
+  withContent(grid, 17, makeUnit('engineer', 'p2'));
   withContent(grid, 26, makeUnit('artillery', 'p2'));
   withContent(grid, 16, makeUnit('saboteur', 'p2'));
 
-  grid[27].p1View = { state: 'ghost', lastType: 'infantry', lastTurn: 1 };
-  grid[16].p1View = { state: 'unknown' };
-  grid[72].p2View = { state: 'ghost', lastType: 'infantry', lastTurn: 1 };
 
   return grid;
 };
@@ -117,7 +118,11 @@ export const useGameStore = create((set, get) => ({
     const selected = selectedCell !== null ? grid[selectedCell] : null;
 
     if (selected?.content?.owner === activePlayer) {
-      if (clicked.content?.owner === activePlayer && clicked.content.kind === 'unit') {
+      const targetViewState = clicked[`${activePlayer}View`].state;
+      const isTargetRevealed = targetViewState === 'unit' || targetViewState === 'building';
+      const isOwnUnit = clicked.content?.owner === activePlayer;
+
+      if (sourceMode === 'own' && isOwnUnit && clicked.content.kind === 'unit') {
         set({ selectedCell: id, buildMode: null });
         return;
       }
@@ -128,12 +133,12 @@ export const useGameStore = create((set, get) => ({
       }
 
       if (areNeighbors(selectedCell, id)) {
-        if (clicked.content && clicked.content.owner !== activePlayer) {
+        if (clicked.content && clicked.content.owner !== activePlayer && isTargetRevealed) {
           get().attackTarget(id);
           return;
         }
 
-        if (!clicked.content && selected.content.type === 'scout' && sourceMode === 'enemy') {
+        if (selected.content.type === 'scout' && sourceMode === 'enemy' && !isOwnUnit) {
           get().revealCell(id);
           return;
         }
@@ -145,7 +150,8 @@ export const useGameStore = create((set, get) => ({
       }
     }
 
-    if (clicked.content?.owner === activePlayer
+    if (sourceMode === 'own'
+      && clicked.content?.owner === activePlayer
       && clicked.content.kind === 'unit'
       && clicked.content.ap > 0
       && actionPoints[activePlayer] > 0
@@ -242,12 +248,16 @@ export const useGameStore = create((set, get) => ({
     const enemy = getEnemy(activePlayer);
     const enemyView = `${enemy}View`;
     const ownerView = `${activePlayer}View`;
+    const enemyPrevView = fromCell[enemyView];
+    const shouldLeaveGhost = enemyPrevView.state === 'unit' || enemyPrevView.state === 'building';
     const newGrid = cloneGrid(grid);
 
     newGrid[fromId] = {
       ...newGrid[fromId],
       content: null,
-      [enemyView]: { state: 'ghost', lastType: unit.type, lastTurn: get().turn },
+      [enemyView]: shouldLeaveGhost
+        ? { state: 'ghost', lastType: unit.type, lastTurn: get().turn }
+        : enemyPrevView,
       [ownerView]: { state: 'empty', turnDetected: get().turn },
     };
 
@@ -274,6 +284,9 @@ export const useGameStore = create((set, get) => ({
     if (attackerCell.content.ap <= 0 || actionPoints[activePlayer] <= 0 || (attackerCell.content.cooldown ?? 0) > 0) return;
     if (!areNeighbors(selectedCell, targetId)) return;
     if (!targetCell.content || targetCell.content.owner === activePlayer) return;
+
+    const targetViewState = targetCell[`${activePlayer}View`].state;
+    if (targetViewState !== 'unit' && targetViewState !== 'building') return;
 
     const newGrid = cloneGrid(grid);
     const attackerType = attackerCell.content.type;
@@ -340,7 +353,7 @@ export const useGameStore = create((set, get) => ({
     }
 
     newGrid[selectedCell].content.ap = 0;
-    newGrid[selectedCell].content.cooldown = 1;
+    newGrid[selectedCell].content.cooldown = 2;
 
     set((state) => ({
       grid: newGrid,
@@ -409,8 +422,8 @@ export const useGameStore = create((set, get) => ({
 
     const income = grid.reduce((acc, cell) => {
       if (cell.content?.owner !== player) return acc;
-      if (cell.content.type === 'base') return acc + 5;
-      if (cell.content.type === 'hq') return acc + 15;
+      if (cell.content.type === 'base') return acc + BASE_INCOME;
+      if (cell.content.type === 'hq') return acc + HQ_INCOME;
       return acc;
     }, 0);
 

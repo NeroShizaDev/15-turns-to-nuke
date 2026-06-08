@@ -12,7 +12,6 @@ const getDisplay = (cell, activePlayer, mode) => {
 
   const view = cell[`${activePlayer}View`];
 
-  if (ownContent) return { state: 'own', content: ownContent };
   if (view.state === 'unit' || view.state === 'building') {
     return { state: 'enemy', content: { type: view.type }, turnDetected: view.turnDetected };
   }
