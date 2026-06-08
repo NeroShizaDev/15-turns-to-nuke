@@ -17,11 +17,39 @@ import {
 const playerName = (player) => (player === 'p1' ? 'Игрок 1' : 'Игрок 2');
 const BASE_INCOME = 5;
 const HQ_INCOME = 20;
+const ENGINEER_REPAIR_COST = 10;
+const SABOTEUR_STEAL_AMOUNT = 5;
+
+const BUILDING_MAX_HP = {
+  base: 2,
+  hq: 4,
+  rocketSilo: 3,
+};
 
 const cloneGrid = (grid) => grid.map((cell) => ({
   ...cell,
   content: cell.content ? { ...cell.content } : null,
 }));
+
+const applySaboteurDetection = (grid, player, turn) => {
+  const enemy = getEnemy(player);
+  const viewKey = `${player}View`;
+
+  return grid.map((cell) => {
+    if (cell.content?.owner !== enemy || cell.content.type !== 'saboteur') return cell;
+
+    const hasAllyAdjacent = grid.some((ally) => ally.content?.owner === player
+      && ally.content.kind === 'unit'
+      && areNeighbors(ally.id, cell.id));
+
+    if (!hasAllyAdjacent) return cell;
+
+    return {
+      ...cell,
+      [viewKey]: { state: 'unit', type: 'saboteur', turnDetected: turn },
+    };
+  });
+};
 
 const appendLog = (state, message) => [
   `Ход ${state.turn}: ${message}`,
@@ -133,6 +161,22 @@ export const useGameStore = create((set, get) => ({
       }
 
       if (areNeighbors(selectedCell, id)) {
+        if (selected.content.type === 'engineer'
+          && sourceMode === 'own'
+          && clicked.content?.owner === activePlayer
+          && clicked.content.kind === 'building') {
+          get().engineerRepair(id);
+          return;
+        }
+
+        if (selected.content.type === 'saboteur'
+          && clicked.content?.owner !== activePlayer
+          && (clicked.content?.type === 'base' || clicked.content?.type === 'hq')
+          && isTargetRevealed) {
+          get().saboteurSteal(id);
+          return;
+        }
+
         if (clicked.content && clicked.content.owner !== activePlayer && isTargetRevealed) {
           get().attackTarget(id);
           return;
@@ -197,8 +241,10 @@ export const useGameStore = create((set, get) => ({
     const unit = makeUnit(buildMode, activePlayer);
     newGrid[targetId] = setKnownContent({ ...newGrid[targetId], content: unit }, activePlayer, unit, get().turn);
 
+    const detectedGrid = applySaboteurDetection(newGrid, activePlayer, get().turn);
+
     set((state) => ({
-      grid: newGrid,
+      grid: detectedGrid,
       buildMode: null,
       hiredThisTurn: {
         ...state.hiredThisTurn,
@@ -227,8 +273,10 @@ export const useGameStore = create((set, get) => ({
     newGrid[id] = revealTruthFor(newGrid[id], activePlayer, turn);
     newGrid[selectedCell].content.ap = 0;
 
+    const detectedGrid = applySaboteurDetection(newGrid, activePlayer, turn);
+
     set((state) => ({
-      grid: newGrid,
+      grid: detectedGrid,
       selectedCell: null,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
       log: appendLog(state, `Разведчик вскрыл ${idToCoord(id)}.`),
@@ -267,8 +315,10 @@ export const useGameStore = create((set, get) => ({
       [ownerView]: { state: 'unit', type: unit.type, turnDetected: get().turn },
     };
 
+    const detectedGrid = applySaboteurDetection(newGrid, activePlayer, get().turn);
+
     set((state) => ({
-      grid: newGrid,
+      grid: detectedGrid,
       selectedCell: null,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
       log: appendLog(state, `${playerName(activePlayer)} двинул ${UNIT_META[unit.type].label} ${idToCoord(fromId)} → ${idToCoord(toId)}.`),
@@ -317,6 +367,92 @@ export const useGameStore = create((set, get) => ({
       selectedCell: null,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
       log: appendLog(state, message),
+    }));
+  },
+
+  engineerRepair: (buildingId) => {
+    const { grid, activePlayer, actionPoints, selectedCell, money, turn } = get();
+    const engineerCell = selectedCell !== null ? grid[selectedCell] : null;
+    const targetCell = grid[buildingId];
+
+    if (!engineerCell?.content || engineerCell.content.owner !== activePlayer || engineerCell.content.type !== 'engineer') return;
+    if (engineerCell.content.ap <= 0 || actionPoints[activePlayer] < 1) return;
+    if (!areNeighbors(selectedCell, buildingId)) return;
+
+    const building = targetCell.content;
+    if (!building || building.owner !== activePlayer || building.kind !== 'building') return;
+
+    const maxHp = BUILDING_MAX_HP[building.type] ?? 1;
+    if ((building.hp ?? maxHp) >= maxHp) {
+      set((state) => ({ log: appendLog(state, `${UNIT_META[building.type].label} уже полностью исправно.`) }));
+      return;
+    }
+
+    if (building.lastRepaired === turn) {
+      set((state) => ({ log: appendLog(state, 'Это здание уже чинили в этом ходу.') }));
+      return;
+    }
+
+    if (money[activePlayer] < ENGINEER_REPAIR_COST) {
+      set((state) => ({ log: appendLog(state, `не хватает денег на ремонт: нужно $${ENGINEER_REPAIR_COST}.`) }));
+      return;
+    }
+
+    const newGrid = cloneGrid(grid);
+    newGrid[buildingId] = {
+      ...newGrid[buildingId],
+      content: { ...newGrid[buildingId].content, hp: (building.hp ?? maxHp) + 1, lastRepaired: turn },
+    };
+    newGrid[selectedCell] = {
+      ...newGrid[selectedCell],
+      content: { ...newGrid[selectedCell].content, ap: 0 },
+    };
+
+    set((state) => ({
+      grid: newGrid,
+      selectedCell: null,
+      money: { ...state.money, [activePlayer]: state.money[activePlayer] - ENGINEER_REPAIR_COST },
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      log: appendLog(state, `Инженер починил ${UNIT_META[building.type].label} на ${idToCoord(buildingId)} за $${ENGINEER_REPAIR_COST} (HP: ${(building.hp ?? maxHp) + 1}/${maxHp}).`),
+    }));
+  },
+
+  saboteurSteal: (targetId) => {
+    const { grid, activePlayer, actionPoints, selectedCell, money } = get();
+    const saboteurCell = selectedCell !== null ? grid[selectedCell] : null;
+    const targetCell = grid[targetId];
+
+    if (!saboteurCell?.content || saboteurCell.content.owner !== activePlayer || saboteurCell.content.type !== 'saboteur') return;
+    if (saboteurCell.content.ap <= 0 || actionPoints[activePlayer] < 1) return;
+    if (!areNeighbors(selectedCell, targetId)) return;
+    if (!targetCell.content || targetCell.content.owner === activePlayer) return;
+    if (targetCell.content.type !== 'base' && targetCell.content.type !== 'hq') return;
+
+    const targetView = targetCell[`${activePlayer}View`];
+    if (targetView.state !== 'building' || targetView.type !== targetCell.content.type) return;
+
+    const enemy = getEnemy(activePlayer);
+    if (money[enemy] < SABOTEUR_STEAL_AMOUNT) {
+      set((state) => ({ log: appendLog(state, 'у врага недостаточно денег для кражи.') }));
+      return;
+    }
+
+    const newGrid = cloneGrid(grid);
+    newGrid[selectedCell] = {
+      ...newGrid[selectedCell],
+      content: { ...newGrid[selectedCell].content, ap: 0 },
+    };
+
+    set((state) => ({
+      grid: newGrid,
+      selectedCell: null,
+      money: {
+        ...state.money,
+        [activePlayer]: state.money[activePlayer] + SABOTEUR_STEAL_AMOUNT,
+        [enemy]: state.money[enemy] - SABOTEUR_STEAL_AMOUNT,
+      },
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      log: appendLog(state, `Диверсант украл $${SABOTEUR_STEAL_AMOUNT} у ${playerName(enemy)}.`),
     }));
   },
 

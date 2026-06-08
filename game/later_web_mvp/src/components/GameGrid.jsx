@@ -48,6 +48,24 @@ const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode 
       && isInRange(selectedCell, cell.id, ARTILLERY_RANGE);
   }
 
+  if (selectedContent.type === 'engineer') {
+    const maxHp = { base: 2, hq: 4, rocketSilo: 3 }[cell.content?.type] ?? 0;
+    return mode === 'own'
+      && areNeighbors(selectedCell, cell.id)
+      && cell.content?.owner === activePlayer
+      && cell.content.kind === 'building'
+      && (cell.content.hp ?? maxHp) < maxHp;
+  }
+
+  if (selectedContent.type === 'saboteur') {
+    const view = cell[`${activePlayer}View`];
+    return mode === 'enemy'
+      && areNeighbors(selectedCell, cell.id)
+      && (view.state === 'building')
+      && (view.type === 'base' || view.type === 'hq')
+      && cell.content?.owner !== activePlayer;
+  }
+
   return mode === 'own' && areNeighbors(selectedCell, cell.id) && !cell.content;
 };
 
