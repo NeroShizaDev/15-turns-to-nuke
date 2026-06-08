@@ -26,10 +26,11 @@ const getDisplay = (cell, activePlayer, mode) => {
   return { state: 'unknown', content: null };
 };
 
-const canActOnCell = ({ mode, cell, grid, selectedCell, buildMode }) => {
+const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode }) => {
   if (buildMode) {
     if (mode !== 'own') return false;
     const hasRecruiterNear = grid.some((candidate) => candidate.content
+      && candidate.content.owner === activePlayer
       && (candidate.content.type === 'base' || candidate.content.type === 'hq')
       && areNeighbors(candidate.id, cell.id));
     return !cell.content && hasRecruiterNear;
@@ -41,7 +42,11 @@ const canActOnCell = ({ mode, cell, grid, selectedCell, buildMode }) => {
   if (!selectedContent) return false;
 
   if (selectedContent.type === 'artillery') {
-    return mode === 'enemy' && selectedCell !== cell.id && isInRange(selectedCell, cell.id, ARTILLERY_RANGE);
+    const isOwnUnit = cell.content?.owner === activePlayer;
+    return mode === 'enemy'
+      && selectedCell !== cell.id
+      && !isOwnUnit
+      && isInRange(selectedCell, cell.id, ARTILLERY_RANGE);
   }
 
   return mode === 'own' && areNeighbors(selectedCell, cell.id) && !cell.content;
@@ -56,7 +61,7 @@ export default function GameGrid({ title, mode, grid, activePlayer, selectedCell
       <div className={`grid grid-cols-10 overflow-hidden border-2 ${mode === 'enemy' ? 'border-red-300' : 'border-blue-400'} bg-white/75 shadow-inner`}>
         {grid.map((cell) => {
           const selected = selectedCell === cell.id;
-          const actionable = canActOnCell({ mode, cell, grid, selectedCell, buildMode });
+          const actionable = canActOnCell({ mode, cell, grid, activePlayer, selectedCell, buildMode });
 
           return (
             <Cell

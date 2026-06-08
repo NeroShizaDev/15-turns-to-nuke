@@ -1,6 +1,6 @@
 import GameGrid from './components/GameGrid.jsx';
 import TransitionScreen from './components/TransitionScreen.jsx';
-import { HIREABLE_UNITS, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META } from './lib/gameData.js';
+import { HIREABLE_UNITS, MAX_HIRES_PER_TURN, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META } from './lib/gameData.js';
 import { useGameStore } from './store/useGameStore.js';
 
 export default function App() {
@@ -12,6 +12,7 @@ export default function App() {
     actionPoints,
     rocketProgress,
     winner,
+    hiredThisTurn,
     selectedCell,
     buildMode,
     log,
@@ -92,7 +93,8 @@ export default function App() {
                   Снять выбор
                 </button>
                 <div className="border border-blue-100 bg-blue-50/50 p-3">
-                  <p className="mb-2 text-xs font-black uppercase tracking-widest">Нанять возле базы</p>
+                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять возле базы</p>
+                  <p className="mb-2 text-[0.65rem] uppercase text-blue-700/70">Лимит: {hiredThisTurn[activePlayer]} / {MAX_HIRES_PER_TURN}</p>
                   <div className="grid gap-2">
                     {HIREABLE_UNITS.map((unitType) => (
                       <button

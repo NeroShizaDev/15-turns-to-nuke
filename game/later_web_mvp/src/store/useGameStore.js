@@ -4,6 +4,7 @@ import {
   ARTILLERY_ACTION_COST,
   ARTILLERY_RANGE,
   HIREABLE_UNITS,
+  MAX_HIRES_PER_TURN,
   ROCKET_LAUNCH_TURNS,
   UNIT_META,
   areNeighbors,
@@ -99,6 +100,7 @@ export const useGameStore = create((set, get) => ({
   winner: null,
   selectedCell: null,
   buildMode: null,
+  hiredThisTurn: { p1: 0, p2: 0 },
   log: ['Ход 1: партия началась, туман войны активен.'],
   grid: createInitialGrid(),
 
@@ -163,8 +165,13 @@ export const useGameStore = create((set, get) => ({
   },
 
   hireUnit: (targetId) => {
-    const { activePlayer, buildMode, grid, money, phase } = get();
+    const { activePlayer, buildMode, grid, money, phase, hiredThisTurn } = get();
     if (!buildMode || phase !== 'ACTION') return;
+
+    if (hiredThisTurn[activePlayer] >= MAX_HIRES_PER_TURN) {
+      set((state) => ({ log: appendLog(state, `лимит найма на ход исчерпан: максимум ${MAX_HIRES_PER_TURN} юнита.`) }));
+      return;
+    }
 
     const cost = UNIT_META[buildMode].cost;
     if (money[activePlayer] < cost) {
@@ -187,6 +194,10 @@ export const useGameStore = create((set, get) => ({
     set((state) => ({
       grid: newGrid,
       buildMode: null,
+      hiredThisTurn: {
+        ...state.hiredThisTurn,
+        [activePlayer]: state.hiredThisTurn[activePlayer] + 1,
+      },
       money: { ...state.money, [activePlayer]: state.money[activePlayer] - cost },
       log: appendLog(state, `${playerName(activePlayer)} нанял ${UNIT_META[buildMode].label} на ${idToCoord(targetId)} за $${cost}.`),
     }));
@@ -378,6 +389,7 @@ export const useGameStore = create((set, get) => ({
         buildMode: null,
         phase: 'TRANSITION',
         actionPoints: { ...state.actionPoints, [nextPlayer]: ACTION_POINTS_PER_TURN },
+        hiredThisTurn: { ...state.hiredThisTurn, [nextPlayer]: 0 },
         rocketProgress,
         winner: newWinner,
         log: appendLog({ ...state, turn: shouldAdvanceTurn ? state.turn + 1 : state.turn }, newWinner

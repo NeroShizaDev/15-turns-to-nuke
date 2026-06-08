@@ -7,7 +7,7 @@ export const PLAYER_LABELS = {
 };
 
 export const UNIT_META = {
-  infantry: { icon: '♙', label: 'Пехота', kind: 'unit', cost: 5, description: 'Ближний бой, ответный удар пехоты.' },
+  infantry: { icon: '♙', label: 'Пехота', kind: 'unit', cost: 10, description: 'Ближний бой, ответный удар пехоты.' },
   scout: { icon: '⌂', label: 'Разведчик', kind: 'unit', cost: 8, description: 'Открывает соседние клетки без выстрела вслепую.' },
   engineer: { icon: '⚙', label: 'Инженер', kind: 'unit', cost: 15, description: 'Резерв под строительство и ремонт.' },
   saboteur: { icon: '☻', label: 'Диверсант', kind: 'unit', cost: 15, description: 'Скрытый юнит для будущих краж ресурсов.' },
@@ -19,6 +19,7 @@ export const UNIT_META = {
 
 export const HIREABLE_UNITS = ['infantry', 'scout', 'artillery'];
 export const ACTION_POINTS_PER_TURN = 6;
+export const MAX_HIRES_PER_TURN = 2;
 export const ARTILLERY_RANGE = 4;
 export const ARTILLERY_ACTION_COST = 2;
 export const ROCKET_LAUNCH_TURNS = 15;
