@@ -1,4 +1,4 @@
-import { ARTILLERY_RANGE, areNeighbors, isInRange } from '../lib/gameData.js';
+import { ARTILLERY_RANGE, BUILDINGS, areNeighbors, isInRange } from '../lib/gameData.js';
 import Cell from './Cell.jsx';
 
 const getDisplay = (cell, activePlayer, mode) => {
@@ -25,12 +25,19 @@ const getDisplay = (cell, activePlayer, mode) => {
   return { state: 'unknown', content: null };
 };
 
+const canRecruitFrom = (cell, activePlayer, unitType) => {
+  const building = cell.content;
+
+  return building?.kind === 'building'
+    && building.owner === activePlayer
+    && !building.damaged
+    && Boolean(BUILDINGS[building.type]?.hireUnits.includes(unitType));
+};
+
 const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode }) => {
   if (buildMode) {
     if (mode !== 'own') return false;
-    const hasRecruiterNear = grid.some((candidate) => candidate.content
-      && candidate.content.owner === activePlayer
-      && (candidate.content.type === 'base' || candidate.content.type === 'hq')
+    const hasRecruiterNear = grid.some((candidate) => canRecruitFrom(candidate, activePlayer, buildMode)
       && areNeighbors(candidate.id, cell.id));
     return !cell.content && hasRecruiterNear;
   }

@@ -3,11 +3,16 @@ import {
   ACTION_POINTS_PER_TURN,
   ARTILLERY_ACTION_COST,
   ARTILLERY_RANGE,
+  BUILDINGS,
+  GRID_SIZE,
   HIREABLE_UNITS,
   MAX_HIRES_PER_TURN,
+  PLAYERS,
   ROCKET_LAUNCH_TURNS,
   UNIT_META,
   areNeighbors,
+  getBuildingData,
+  getBuildingFootprint,
   getEnemy,
   idToCoord,
   isInRange,
@@ -15,12 +20,13 @@ import {
 } from '../lib/gameData.js';
 
 const playerName = (player) => (player === 'p1' ? 'Игрок 1' : 'Игрок 2');
-const BASE_INCOME = 5;
-const HQ_INCOME = 20;
 
 const cloneGrid = (grid) => grid.map((cell) => ({
   ...cell,
   content: cell.content ? { ...cell.content } : null,
+  marks: cell.marks ? [...cell.marks] : [],
+  p1View: cell.p1View ? { ...cell.p1View } : { state: 'unknown' },
+  p2View: cell.p2View ? { ...cell.p2View } : { state: 'unknown' },
 }));
 
 const appendLog = (state, message) => [
@@ -42,54 +48,293 @@ const setKnownContent = (cell, player, content, turn = 1) => ({
   [`${player}View`]: { state: content.kind, type: content.type, turnDetected: turn },
 });
 
+const revealCellTruthFor = (cell, player, turn) => {
+  if (!cell.content) return { ...cell, [`${player}View`]: { state: 'empty', turnDetected: turn } };
+  return setKnownContent(cell, player, cell.content, turn);
+};
+
+export function cellId(x, y) {
+  return y * GRID_SIZE + x;
+}
+
+export function parseCellId(id) {
+  const numericId = Number(id);
+
+  if (!Number.isInteger(numericId) || numericId < 0 || numericId >= GRID_SIZE * GRID_SIZE) {
+    throw new Error(`Invalid cell id: ${id}`);
+  }
+
+  return {
+    x: numericId % GRID_SIZE,
+    y: Math.floor(numericId / GRID_SIZE),
+  };
+}
+
+export function createEmptyGrid(size = GRID_SIZE) {
+  return Array.from({ length: size * size }, (_, id) => makeCell(id));
+}
+
+export function getFootprintCellIds(originId, type) {
+  const { x, y } = parseCellId(originId);
+  const { width, height } = getBuildingFootprint(type);
+  const ids = [];
+
+  for (let dy = 0; dy < height; dy += 1) {
+    for (let dx = 0; dx < width; dx += 1) {
+      ids.push(cellId(x + dx, y + dy));
+    }
+  }
+
+  return ids;
+}
+
+export function getBuildingSegments(grid, buildingId) {
+  return grid
+    .filter((cell) => cell.content?.kind === 'building' && cell.content.buildingId === buildingId)
+    .sort((a, b) => a.content.segmentIndex - b.content.segmentIndex);
+}
+
+export function isBuildingDestroyed(grid, buildingId) {
+  return getBuildingSegments(grid, buildingId).length === 0;
+}
+
+export function placeBuilding(grid, originId, { type, owner }) {
+  getBuildingData(type);
+  const nextGrid = cloneGrid(grid);
+  const ids = getFootprintCellIds(originId, type);
+  const buildingId = `${owner}:${type}:${originId}`;
+
+  ids.forEach((id) => {
+    if (!nextGrid[id]) {
+      throw new Error(`Cannot place ${type}: footprint cell ${id} is outside the grid`);
+    }
+
+    if (nextGrid[id].content) {
+      throw new Error(`Cannot place ${type}: footprint cell ${id} is occupied`);
+    }
+  });
+
+  ids.forEach((id, segmentIndex) => {
+    const segment = {
+      kind: 'building',
+      type,
+      owner,
+      buildingId,
+      segmentIndex,
+      originId,
+      damaged: false,
+    };
+
+    nextGrid[id] = setKnownContent({ ...nextGrid[id], content: segment }, owner, segment);
+  });
+
+  return nextGrid;
+}
+
+export function damageOrDestroyBuilding(grid, targetId) {
+  const target = grid[targetId];
+
+  if (target?.content?.kind !== 'building') {
+    return grid;
+  }
+
+  const nextGrid = cloneGrid(grid);
+  const segment = nextGrid[targetId].content;
+
+  if (segment.damaged) {
+    nextGrid[targetId] = { ...nextGrid[targetId], content: null };
+  } else {
+    nextGrid[targetId] = {
+      ...nextGrid[targetId],
+      content: { ...segment, damaged: true },
+    };
+  }
+
+  return nextGrid;
+}
+
+export function engineerRepair(grid, targetId, engineerOwner) {
+  const target = grid[targetId];
+
+  if (target?.content?.kind !== 'building') {
+    return grid;
+  }
+
+  if (engineerOwner && target.content.owner !== engineerOwner) {
+    return grid;
+  }
+
+  const nextGrid = cloneGrid(grid);
+  nextGrid[targetId] = {
+    ...nextGrid[targetId],
+    content: { ...nextGrid[targetId].content, damaged: false },
+  };
+
+  return nextGrid;
+}
+
+export function hasBuildingSegment(grid, owner, type) {
+  return grid.some(
+    (cell) => cell.content?.kind === 'building'
+      && cell.content.owner === owner
+      && cell.content.type === type,
+  );
+}
+
+export function hasActiveBuilding(grid, owner, type) {
+  return grid.some(
+    (cell) => cell.content?.kind === 'building'
+      && cell.content.owner === owner
+      && cell.content.type === type
+      && !cell.content.damaged,
+  );
+}
+
+export function checkBaseWinCondition(grid, players = PLAYERS) {
+  const alivePlayers = players.filter((player) => hasBuildingSegment(grid, player, 'base') || hasBuildingSegment(grid, player, 'hq'));
+
+  if (alivePlayers.length === 1) {
+    return { winner: alivePlayers[0], reason: 'enemy-base-destroyed' };
+  }
+
+  if (alivePlayers.length === 0) {
+    return { winner: null, reason: 'mutual-base-destruction' };
+  }
+
+  return null;
+}
+
+export function hasActiveRocketSilo(grid, owner) {
+  return hasActiveBuilding(grid, owner, 'rocketSilo');
+}
+
+const calculateIncome = (grid, player) => {
+  const paidBuildingIds = new Set();
+
+  return grid.reduce((income, cell) => {
+    const segment = cell.content;
+
+    if (segment?.kind !== 'building'
+      || segment.owner !== player
+      || segment.damaged
+      || paidBuildingIds.has(segment.buildingId)) {
+      return income;
+    }
+
+    paidBuildingIds.add(segment.buildingId);
+    return income + (BUILDINGS[segment.type]?.income ?? 0);
+  }, 0);
+};
+
+export function applyIncome(state, player) {
+  const income = calculateIncome(state.grid, player);
+
+  if (state.players) {
+    return {
+      ...state,
+      players: {
+        ...state.players,
+        [player]: {
+          ...(state.players[player] ?? { money: 0 }),
+          money: (state.players[player]?.money ?? 0) + income,
+        },
+      },
+    };
+  }
+
+  if (state.money) {
+    return {
+      ...state,
+      money: { ...state.money, [player]: state.money[player] + income },
+    };
+  }
+
+  return state;
+}
+
+export function canHireFrom(grid, originOrBuildingId, unitType, owner) {
+  const segments = grid.filter((cell) => {
+    const segment = cell.content;
+    return segment?.kind === 'building'
+      && segment.owner === owner
+      && !segment.damaged
+      && (segment.originId === originOrBuildingId || segment.buildingId === originOrBuildingId);
+  });
+
+  if (segments.length === 0) {
+    return false;
+  }
+
+  const type = segments[0].content.type;
+  return Boolean(BUILDINGS[type]?.hireUnits.includes(unitType));
+}
+
+export function revealTruthFor(grid, viewer, turn = 1) {
+  return cloneGrid(grid).map((cell) => revealCellTruthFor(cell, viewer, turn));
+}
+
+const canRecruitFromCell = (cell, player, unitType) => cell.content?.kind === 'building'
+  && cell.content.owner === player
+  && !cell.content.damaged
+  && Boolean(BUILDINGS[cell.content.type]?.hireUnits.includes(unitType));
+
 const withContent = (grid, id, content) => {
   grid[id] = setKnownContent({ ...grid[id], content }, content.owner, content);
 };
 
 const createInitialGrid = () => {
-  const grid = Array.from({ length: 100 }, (_, id) => makeCell(id));
+  let grid = createEmptyGrid();
 
-  withContent(grid, 81, { type: 'hq', kind: 'building', owner: 'p1', hp: 4 });
-  withContent(grid, 91, { type: 'base', kind: 'building', owner: 'p1', hp: 2 });
-  withContent(grid, 90, { type: 'rocketSilo', kind: 'building', owner: 'p1', hp: 3 });
+  grid = placeBuilding(grid, 80, { type: 'hq', owner: 'p1' });
+  grid = placeBuilding(grid, 92, { type: 'base', owner: 'p1' });
+  grid = placeBuilding(grid, 88, { type: 'rocketSilo', owner: 'p1' });
   withContent(grid, 72, makeUnit('infantry', 'p1'));
   withContent(grid, 62, makeUnit('scout', 'p1'));
   withContent(grid, 83, makeUnit('engineer', 'p1'));
   withContent(grid, 73, makeUnit('artillery', 'p1'));
   withContent(grid, 84, makeUnit('saboteur', 'p1'));
 
-  withContent(grid, 18, { type: 'hq', kind: 'building', owner: 'p2', hp: 4 });
-  withContent(grid, 8, { type: 'base', kind: 'building', owner: 'p2', hp: 2 });
-  withContent(grid, 9, { type: 'rocketSilo', kind: 'building', owner: 'p2', hp: 3 });
+  grid = placeBuilding(grid, 8, { type: 'hq', owner: 'p2' });
+  grid = placeBuilding(grid, 7, { type: 'base', owner: 'p2' });
+  grid = placeBuilding(grid, 0, { type: 'rocketSilo', owner: 'p2' });
   withContent(grid, 27, makeUnit('infantry', 'p2'));
   withContent(grid, 37, makeUnit('scout', 'p2'));
   withContent(grid, 17, makeUnit('engineer', 'p2'));
   withContent(grid, 26, makeUnit('artillery', 'p2'));
   withContent(grid, 16, makeUnit('saboteur', 'p2'));
 
-
   return grid;
 };
 
-const revealTruthFor = (cell, player, turn) => {
-  if (!cell.content) return { ...cell, [`${player}View`]: { state: 'empty', turnDetected: turn } };
-  return setKnownContent(cell, player, cell.content, turn);
+export const initialState = {
+  grid: createInitialGrid(),
+  players: Object.fromEntries(PLAYERS.map((player) => [player, { money: 0 }])),
+  currentPlayer: PLAYERS[0],
 };
 
-const damageOrDestroyBuilding = (cell) => {
-  const nextHp = (cell.content.hp ?? 1) - 1;
-  if (nextHp <= 0) {
-    return { ...cell, content: null };
-  }
-  return { ...cell, content: { ...cell.content, hp: nextHp } };
+export const gameActions = {
+  placeBuilding: (state, originId, building) => ({ ...state, grid: placeBuilding(state.grid, originId, building) }),
+  damageOrDestroyBuilding: (state, targetId) => ({ ...state, grid: damageOrDestroyBuilding(state.grid, targetId) }),
+  engineerRepair: (state, targetId, owner) => ({ ...state, grid: engineerRepair(state.grid, targetId, owner) }),
+  applyIncome,
 };
 
-const hasActiveRocketSilo = (grid, player) => grid.some(
-  (cell) => cell.content?.owner === player && cell.content.type === 'rocketSilo',
-);
+export function createGameStore(seedState = initialState) {
+  let state = seedState;
+  const listeners = new Set();
 
-const canHireFrom = (cell, player) => cell.content?.owner === player
-  && (cell.content.type === 'base' || cell.content.type === 'hq');
+  return {
+    getState: () => state,
+    setState: (updater) => {
+      state = typeof updater === 'function' ? updater(state) : { ...state, ...updater };
+      listeners.forEach((listener) => listener(state));
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
 
 export const useGameStore = create((set, get) => ({
   turn: 1,
@@ -117,7 +362,7 @@ export const useGameStore = create((set, get) => ({
     const clicked = grid[id];
     const selected = selectedCell !== null ? grid[selectedCell] : null;
 
-    if (selected?.content?.owner === activePlayer) {
+    if (selected?.content?.owner === activePlayer && selected.content.kind === 'unit') {
       const targetViewState = clicked[`${activePlayer}View`].state;
       const isTargetRevealed = targetViewState === 'unit' || targetViewState === 'building';
       const isOwnUnit = clicked.content?.owner === activePlayer;
@@ -186,7 +431,8 @@ export const useGameStore = create((set, get) => ({
     }
 
     const targetCell = grid[targetId];
-    const hasFriendlyRecruiterNear = grid.some((cell) => canHireFrom(cell, activePlayer) && areNeighbors(cell.id, targetId));
+    const hasFriendlyRecruiterNear = grid.some((cell) => canRecruitFromCell(cell, activePlayer, buildMode)
+      && areNeighbors(cell.id, targetId));
 
     if (targetCell.content || !hasFriendlyRecruiterNear) {
       set((state) => ({ log: appendLog(state, 'нанимать можно только в пустую соседнюю клетку возле своей базы или HQ.') }));
@@ -224,7 +470,7 @@ export const useGameStore = create((set, get) => ({
     }
 
     const newGrid = cloneGrid(grid);
-    newGrid[id] = revealTruthFor(newGrid[id], activePlayer, turn);
+    newGrid[id] = revealCellTruthFor(newGrid[id], activePlayer, turn);
     newGrid[selectedCell].content.ap = 0;
 
     set((state) => ({
@@ -240,7 +486,7 @@ export const useGameStore = create((set, get) => ({
     const fromCell = grid[fromId];
     const toCell = grid[toId];
 
-    if (!fromCell.content || fromCell.content.owner !== activePlayer) return;
+    if (!fromCell.content || fromCell.content.kind !== 'unit' || fromCell.content.owner !== activePlayer) return;
     if (fromCell.content.ap <= 0 || actionPoints[activePlayer] <= 0 || (fromCell.content.cooldown ?? 0) > 0) return;
     if (!areNeighbors(fromId, toId) || toCell.content) return;
 
@@ -271,7 +517,7 @@ export const useGameStore = create((set, get) => ({
       grid: newGrid,
       selectedCell: null,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
-      log: appendLog(state, `${playerName(activePlayer)} двинул ${UNIT_META[unit.type].label} ${idToCoord(fromId)} → ${idToCoord(toId)}.`),
+      log: appendLog(state, `${playerName(activePlayer)} двинул ${UNIT_META[unit.type].label} ${idToCoord(fromId)} -> ${idToCoord(toId)}.`),
     }));
   },
 
@@ -280,7 +526,7 @@ export const useGameStore = create((set, get) => ({
     const attackerCell = selectedCell !== null ? grid[selectedCell] : null;
     const targetCell = grid[targetId];
 
-    if (!attackerCell?.content || attackerCell.content.owner !== activePlayer) return;
+    if (!attackerCell?.content || attackerCell.content.kind !== 'unit' || attackerCell.content.owner !== activePlayer) return;
     if (attackerCell.content.ap <= 0 || actionPoints[activePlayer] <= 0 || (attackerCell.content.cooldown ?? 0) > 0) return;
     if (!areNeighbors(selectedCell, targetId)) return;
     if (!targetCell.content || targetCell.content.owner === activePlayer) return;
@@ -288,7 +534,7 @@ export const useGameStore = create((set, get) => ({
     const targetViewState = targetCell[`${activePlayer}View`].state;
     if (targetViewState !== 'unit' && targetViewState !== 'building') return;
 
-    const newGrid = cloneGrid(grid);
+    let newGrid = cloneGrid(grid);
     const attackerType = attackerCell.content.type;
     const targetType = targetCell.content.type;
     const isCounterAttackPossible = targetCell.content.type === 'infantry';
@@ -305,18 +551,26 @@ export const useGameStore = create((set, get) => ({
         message += ' Ответный удар: атакующий тоже погиб.';
       }
     } else {
-      const damaged = damageOrDestroyBuilding(newGrid[targetId]);
-      newGrid[targetId] = revealTruthFor(damaged, activePlayer, turn);
-      message += damaged.content ? ` Прочность: ${damaged.content.hp}.` : ' Здание разрушено.';
+      const buildingId = targetCell.content.buildingId;
+      newGrid = damageOrDestroyBuilding(newGrid, targetId);
+      newGrid[targetId] = revealCellTruthFor(newGrid[targetId], activePlayer, turn);
+      message += newGrid[targetId].content ? ' Сегмент здания поврежден.' : ' Сегмент здания разрушен.';
+      if (isBuildingDestroyed(newGrid, buildingId)) {
+        message += ` ${UNIT_META[targetType].label} уничтожена полностью.`;
+      }
     }
 
     if (newGrid[selectedCell].content) newGrid[selectedCell].content.ap = 0;
+    const baseResult = checkBaseWinCondition(newGrid);
 
     set((state) => ({
       grid: newGrid,
       selectedCell: null,
+      winner: baseResult?.winner ?? state.winner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
-      log: appendLog(state, message),
+      log: appendLog(state, baseResult?.winner
+        ? `${message} ${playerName(baseResult.winner)} победил: база противника уничтожена.`
+        : message),
     }));
   },
 
@@ -334,7 +588,7 @@ export const useGameStore = create((set, get) => ({
     }
     if (targetCell.content?.owner === activePlayer) return;
 
-    const newGrid = cloneGrid(grid);
+    let newGrid = cloneGrid(grid);
     let message = `Артиллерия дала слепой залп по ${idToCoord(targetId)}.`;
 
     if (!targetCell.content) {
@@ -345,21 +599,30 @@ export const useGameStore = create((set, get) => ({
       newGrid[targetId].content = null;
       newGrid[targetId][`${activePlayer}View`] = { state: 'empty', turnDetected: turn };
     } else {
-      const damaged = damageOrDestroyBuilding(newGrid[targetId]);
-      newGrid[targetId] = revealTruthFor(damaged, activePlayer, turn);
-      message += damaged.content
-        ? ` Попадание по зданию ${UNIT_META[targetCell.content.type].label}, прочность ${damaged.content.hp}.`
-        : ` Попадание: ${UNIT_META[targetCell.content.type].label} разрушена.`;
+      const targetType = targetCell.content.type;
+      const buildingId = targetCell.content.buildingId;
+      newGrid = damageOrDestroyBuilding(newGrid, targetId);
+      newGrid[targetId] = revealCellTruthFor(newGrid[targetId], activePlayer, turn);
+      message += newGrid[targetId].content
+        ? ` Попадание по зданию ${UNIT_META[targetType].label}: сегмент поврежден.`
+        : ` Попадание: сегмент здания ${UNIT_META[targetType].label} разрушен.`;
+      if (isBuildingDestroyed(newGrid, buildingId)) {
+        message += ` ${UNIT_META[targetType].label} уничтожена полностью.`;
+      }
     }
 
     newGrid[selectedCell].content.ap = 0;
     newGrid[selectedCell].content.cooldown = 2;
+    const baseResult = checkBaseWinCondition(newGrid);
 
     set((state) => ({
       grid: newGrid,
       selectedCell: null,
+      winner: baseResult?.winner ?? state.winner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - ARTILLERY_ACTION_COST },
-      log: appendLog(state, message),
+      log: appendLog(state, baseResult?.winner
+        ? `${message} ${playerName(baseResult.winner)} победил: база противника уничтожена.`
+        : message),
     }));
   },
 
@@ -392,7 +655,7 @@ export const useGameStore = create((set, get) => ({
       const newWinner = nextRocketValue >= ROCKET_LAUNCH_TURNS ? nextPlayer : state.winner;
       const rocketMessage = rocketIsCharging
         ? `Ракетная шахта ${playerName(nextPlayer)} заряжается: ${nextRocketValue}/${ROCKET_LAUNCH_TURNS}.`
-        : `у ${playerName(nextPlayer)} нет активной шахты — ядерный таймер стоит.`;
+        : `у ${playerName(nextPlayer)} нет активной шахты - ядерный таймер стоит.`;
 
       return {
         grid: resetGrid,
@@ -420,12 +683,7 @@ export const useGameStore = create((set, get) => ({
     const { grid, winner } = get();
     if (winner) return;
 
-    const income = grid.reduce((acc, cell) => {
-      if (cell.content?.owner !== player) return acc;
-      if (cell.content.type === 'base') return acc + BASE_INCOME;
-      if (cell.content.type === 'hq') return acc + HQ_INCOME;
-      return acc;
-    }, 0);
+    const income = calculateIncome(grid, player);
 
     set((state) => ({
       money: { ...state.money, [player]: state.money[player] + income },
@@ -433,3 +691,5 @@ export const useGameStore = create((set, get) => ({
     }));
   },
 }));
+
+export default useGameStore;

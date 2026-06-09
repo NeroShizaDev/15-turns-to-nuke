@@ -1,21 +1,47 @@
 import { UNIT_META } from '../lib/gameData.js';
 
+const getBuildingClasses = (segment) => {
+  if (segment?.kind !== 'building') {
+    return '';
+  }
+
+  return [
+    'cell',
+    'cell--building',
+    `cell--building-${segment.type}`,
+    `cell--owner-${segment.owner}`,
+    segment.damaged ? 'cell--damaged' : '',
+    segment.segmentIndex === 0 ? 'cell--origin' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+};
+
 const resolveIcon = (content) => {
   if (!content) return '';
   if (typeof content === 'string') return UNIT_META[content]?.icon ?? content;
-  return UNIT_META[content.type]?.icon ?? '?';
+  if (content.kind === 'building' && content.segmentIndex > 0) {
+    return content.damaged ? '!' : '•';
+  }
+  return `${UNIT_META[content.type]?.icon ?? '?'}${content.damaged ? '!' : ''}`;
 };
 
 const resolveLabel = (content) => {
   if (!content) return '';
   if (typeof content === 'string') return UNIT_META[content]?.label ?? content;
-  return UNIT_META[content.type]?.label ?? content.type;
+
+  const label = UNIT_META[content.type]?.label ?? content.type;
+  if (content.kind !== 'building') return label;
+
+  const segment = `сегмент ${content.segmentIndex + 1}`;
+  return content.damaged ? `${label}, ${segment}, поврежден` : `${label}, ${segment}`;
 };
 
 export default function Cell({ cell, display, selected, actionable, onClick, activePlayer }) {
   const icon = resolveIcon(display.content);
   const label = resolveLabel(display.content);
   const state = display.state;
+  const visibleSegment = state === 'own' && cell.content?.kind === 'building' ? cell.content : null;
   const isOwnSpentUnit = cell.content?.owner === activePlayer
     && cell.content.kind === 'unit'
     && (cell.content.ap === 0 || (cell.content.cooldown ?? 0) > 0);
@@ -32,8 +58,13 @@ export default function Cell({ cell, display, selected, actionable, onClick, act
     <button
       type="button"
       title={`${cell.coords}${label ? ` — ${label}` : ''}`}
+      aria-label={`${cell.coords}${label ? ` — ${label}` : ''}`}
+      data-cell-id={cell.id}
+      data-building-id={visibleSegment?.buildingId}
+      data-origin-id={visibleSegment?.originId}
+      data-segment-index={visibleSegment?.segmentIndex}
       onClick={() => onClick(cell.id)}
-      className={`relative flex aspect-square items-center justify-center border border-blue-200/80 text-xl transition hover:bg-blue-100/70 ${tone} ${selected ? 'ring-2 ring-red-500 z-10' : ''} ${actionable ? 'after:absolute after:h-2 after:w-2 after:rounded-full after:bg-red-500/80' : ''}`}
+      className={`relative flex aspect-square items-center justify-center border border-blue-200/80 text-xl transition hover:bg-blue-100/70 ${tone} ${getBuildingClasses(visibleSegment)} ${selected ? 'ring-2 ring-red-500 z-10' : ''} ${actionable ? 'after:absolute after:h-2 after:w-2 after:rounded-full after:bg-red-500/80' : ''}`}
     >
       {state === 'unknown' ? '?' : icon}
 
