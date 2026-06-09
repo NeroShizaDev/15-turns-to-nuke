@@ -11,6 +11,7 @@ export default function App() {
     money,
     actionPoints,
     rocketProgress,
+    rockets,
     winner,
     hiredThisTurn,
     selectedCell,
@@ -65,6 +66,7 @@ export default function App() {
             title="Твоя карта"
             mode="own"
             grid={grid}
+            rockets={rockets}
             activePlayer={activePlayer}
             selectedCell={selectedCell}
             buildMode={buildMode}
@@ -75,6 +77,7 @@ export default function App() {
             title="Карта противника"
             mode="enemy"
             grid={grid}
+            rockets={rockets}
             activePlayer={activePlayer}
             selectedCell={selectedCell}
             buildMode={buildMode}

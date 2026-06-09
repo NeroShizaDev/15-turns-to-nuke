@@ -17,9 +17,24 @@ const getBuildingClasses = (segment) => {
     .join(' ');
 };
 
+const getRocketClasses = (content) => {
+  if (content?.kind !== 'rocket') {
+    return '';
+  }
+
+  return [
+    'cell--rocket',
+    `cell--rocket-${content.rocketSegment}`,
+    content.damaged ? 'cell--rocket-damaged' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+};
+
 const resolveIcon = (content) => {
   if (!content) return '';
   if (typeof content === 'string') return UNIT_META[content]?.icon ?? content;
+  if (content.kind === 'rocket') return content.damaged ? 'R!' : 'R';
   if (content.kind === 'building' && content.segmentIndex > 0) {
     return content.damaged ? '!' : '•';
   }
@@ -29,6 +44,10 @@ const resolveIcon = (content) => {
 const resolveLabel = (content) => {
   if (!content) return '';
   if (typeof content === 'string') return UNIT_META[content]?.label ?? content;
+
+  if (content.kind === 'rocket') {
+    return `${content.owner} ${content.rocketId}, ${content.rocketSegment}${content.damaged ? ', damaged' : ''}`;
+  }
 
   const label = UNIT_META[content.type]?.label ?? content.type;
   if (content.kind !== 'building') return label;
@@ -64,9 +83,15 @@ export default function Cell({ cell, display, selected, actionable, onClick, act
       data-origin-id={visibleSegment?.originId}
       data-segment-index={visibleSegment?.segmentIndex}
       onClick={() => onClick(cell.id)}
-      className={`relative flex aspect-square items-center justify-center border border-blue-200/80 text-xl transition hover:bg-blue-100/70 ${tone} ${getBuildingClasses(visibleSegment)} ${selected ? 'ring-2 ring-red-500 z-10' : ''} ${actionable ? 'after:absolute after:h-2 after:w-2 after:rounded-full after:bg-red-500/80' : ''}`}
+      className={`relative flex aspect-square items-center justify-center border border-blue-200/80 text-xl transition hover:bg-blue-100/70 ${tone} ${getBuildingClasses(visibleSegment)} ${getRocketClasses(display.content)} ${selected ? 'ring-2 ring-red-500 z-10' : ''} ${actionable ? 'after:absolute after:h-2 after:w-2 after:rounded-full after:bg-red-500/80' : ''}`}
     >
       {state === 'unknown' ? '?' : icon}
+
+      {display.content?.kind === 'rocket' && (
+        <span className="absolute top-0.5 left-0.5 text-[0.55rem] font-bold leading-none text-red-500">
+          {display.content.rocketSegment}
+        </span>
+      )}
 
       {isOwnSpentUnit && (
         <span
