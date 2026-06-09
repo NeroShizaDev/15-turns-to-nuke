@@ -183,6 +183,29 @@ const damageSegment = (cell) => {
   };
 };
 
+const clearContentAndViews = (cell, turn) => ({
+  ...cell,
+  content: null,
+  p1View: { state: 'empty', turnDetected: normalizeTurn(turn) },
+  p2View: { state: 'empty', turnDetected: normalizeTurn(turn) },
+});
+
+const removeRocketIfDestroyed = (grid, rocketId, turn) => {
+  if (!rocketId) return false;
+
+  const rocketCells = getRocketCells(grid, rocketId);
+  const allRocketCellsDamaged = rocketCells.length > 0
+    && rocketCells.every((cell) => cell.content?.damaged);
+
+  if (rocketCells.length > 0 && !allRocketCellsDamaged) return false;
+
+  rocketCells.forEach((cell) => {
+    grid[cell.id] = clearContentAndViews(grid[cell.id], turn);
+  });
+
+  return true;
+};
+
 const hasStructure = (grid, player, type) => grid.some(
   (cell) => cell.content?.owner === player && cell.content.type === type,
 );
@@ -265,7 +288,7 @@ const moveRocket = (grid, rocket, turn) => {
 
   if (reachedEdge) {
     const clearedGrid = grid.map((cell) => (
-      cell.content?.rocketId === rocket.rocketId ? { ...cell, content: null } : cell
+      cell.content?.rocketId === rocket.rocketId ? clearContentAndViews(cell, turn) : cell
     ));
     return {
       grid: clearedGrid,
@@ -283,7 +306,7 @@ const moveRocket = (grid, rocket, turn) => {
   const newOriginId = Math.min(...nextIds);
   const nextByOldId = new Map(nextPositions.map((position) => [position.oldId, xyToId(position.x, position.y)]));
   let movedGrid = grid.map((cell) => (
-    cell.content?.rocketId === rocket.rocketId ? { ...cell, content: null } : cell
+    cell.content?.rocketId === rocket.rocketId ? clearContentAndViews(cell, turn) : cell
   ));
 
   currentCells.forEach((cell) => {
@@ -522,7 +545,7 @@ export const useGameStore = create((set, get) => ({
   },
 
   attackTarget: (targetId) => {
-    const { grid, activePlayer, actionPoints, selectedCell, turn } = get();
+    const { grid, activePlayer, actionPoints, selectedCell, turn, rockets } = get();
     const attackerCell = selectedCell !== null ? grid[selectedCell] : null;
     const targetCell = grid[targetId];
 
@@ -550,24 +573,36 @@ export const useGameStore = create((set, get) => ({
         message += ' Ответный удар: атакующий тоже погиб.';
       }
     } else if (targetCell.content.kind === 'building' || targetCell.content.kind === 'rocket') {
+      const rocketId = targetCell.content.rocketId;
       newGrid[targetId] = damageSegment(newGrid[targetId]);
-      newGrid[targetId] = revealTruthFor(newGrid[targetId], activePlayer, turn);
+      newGrid[targetId] = rocketId && !newGrid[targetId].content
+        ? clearContentAndViews(newGrid[targetId], turn)
+        : revealTruthFor(newGrid[targetId], activePlayer, turn);
       message += newGrid[targetId].content
         ? ` Сегмент ${UNIT_META[targetType].label} повреждён.`
         : ` Сегмент ${UNIT_META[targetType].label} уничтожен.`;
+
+      if (removeRocketIfDestroyed(newGrid, rocketId, turn)) {
+        message += ' Ядерная ракета сбита.';
+      }
     }
 
     if (newGrid[selectedCell].content) newGrid[selectedCell].content.ap = 0;
 
-    const newWinner = checkBaseWinCondition(newGrid);
+    const activeRocketIds = new Set(newGrid.filter((cell) => cell.content?.kind === 'rocket').map((cell) => cell.content.rocketId));
+    const nextRockets = rockets.filter((rocket) => activeRocketIds.has(rocket.rocketId));
+    const rocketShootdownWinner = nextRockets.length < rockets.length ? activePlayer : null;
+    const baseWinner = checkBaseWinCondition(newGrid);
+    const newWinner = rocketShootdownWinner ?? baseWinner;
 
     set((state) => ({
       grid: newGrid,
+      rockets: nextRockets,
       selectedCell: null,
       winner: newWinner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
       log: appendLog(state, newWinner
-        ? `${playerName(newWinner)} побеждает, уничтожив все базы противника!`
+        ? `${playerName(newWinner)} побеждает${rocketShootdownWinner ? ', сбив ядерную ракету!' : ', уничтожив все базы противника!'}`
         : message),
     }));
   },
@@ -691,29 +726,26 @@ export const useGameStore = create((set, get) => ({
     } else if (targetCell.content.kind === 'building' || targetCell.content.kind === 'rocket') {
       const rocketId = targetCell.content.rocketId;
       newGrid[targetId] = damageSegment(newGrid[targetId]);
-      newGrid[targetId] = revealTruthFor(newGrid[targetId], activePlayer, turn);
+      newGrid[targetId] = rocketId && !newGrid[targetId].content
+        ? clearContentAndViews(newGrid[targetId], turn)
+        : revealTruthFor(newGrid[targetId], activePlayer, turn);
       message += newGrid[targetId].content
         ? ` Сегмент ${UNIT_META[targetCell.content.type].label} повреждён.`
         : ` Сегмент ${UNIT_META[targetCell.content.type].label} уничтожен.`;
 
-      if (rocketId) {
-        const rocketCells = getRocketCells(newGrid, rocketId);
-        const allRocketCellsDamaged = rocketCells.length > 0 && rocketCells.every((cell) => cell.content?.damaged);
-        if (rocketCells.length === 0 || allRocketCellsDamaged) {
-          rocketCells.forEach((cell) => {
-            newGrid[cell.id] = { ...newGrid[cell.id], content: null };
-          });
-          message += ' Ядерная ракета сбита.';
-        }
+      if (removeRocketIfDestroyed(newGrid, rocketId, turn)) {
+        message += ' Ядерная ракета сбита.';
       }
     }
 
     newGrid[selectedCell].content.ap = 0;
     newGrid[selectedCell].content.cooldown = ARTILLERY_COOLDOWN_VALUE;
 
-    const newWinner = checkBaseWinCondition(newGrid);
     const activeRocketIds = new Set(newGrid.filter((cell) => cell.content?.kind === 'rocket').map((cell) => cell.content.rocketId));
     const nextRockets = rockets.filter((rocket) => activeRocketIds.has(rocket.rocketId));
+    const rocketShootdownWinner = nextRockets.length < rockets.length ? activePlayer : null;
+    const baseWinner = checkBaseWinCondition(newGrid);
+    const newWinner = rocketShootdownWinner ?? baseWinner;
 
     set((state) => ({
       grid: newGrid,
@@ -722,7 +754,7 @@ export const useGameStore = create((set, get) => ({
       winner: newWinner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - ARTILLERY_ACTION_COST },
       log: appendLog(state, newWinner
-        ? `${playerName(newWinner)} побеждает, уничтожив все базы противника!`
+        ? `${playerName(newWinner)} побеждает${rocketShootdownWinner ? ', сбив ядерную ракету!' : ', уничтожив все базы противника!'}`
         : message),
     }));
   },
