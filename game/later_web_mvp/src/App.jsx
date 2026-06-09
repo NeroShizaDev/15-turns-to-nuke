@@ -1,6 +1,6 @@
 import GameGrid from './components/GameGrid.jsx';
 import TransitionScreen from './components/TransitionScreen.jsx';
-import { HIREABLE_UNITS, MAX_HIRES_PER_TURN, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META } from './lib/gameData.js';
+import { BUILDABLE_BUILDINGS, BUILDINGS, HIREABLE_UNITS, MAX_HIRES_PER_TURN, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META } from './lib/gameData.js';
 import { useGameStore } from './store/useGameStore.js';
 
 export default function App() {
@@ -16,12 +16,14 @@ export default function App() {
     hiredThisTurn,
     selectedCell,
     buildMode,
+    structureMode,
     log,
     grid,
     selectCell,
     nextTurn,
     clearSelection,
     setBuildMode,
+    setStructureMode,
   } = useGameStore();
 
   const selectedContent = selectedCell !== null ? grid[selectedCell]?.content : null;
@@ -70,6 +72,7 @@ export default function App() {
             activePlayer={activePlayer}
             selectedCell={selectedCell}
             buildMode={buildMode}
+            structureMode={structureMode}
             onCellClick={selectCell}
           />
 
@@ -81,6 +84,7 @@ export default function App() {
             activePlayer={activePlayer}
             selectedCell={selectedCell}
             buildMode={buildMode}
+            structureMode={structureMode}
             onCellClick={selectCell}
           />
 
@@ -95,8 +99,26 @@ export default function App() {
                 >
                   Снять выбор
                 </button>
+                {selectedContent?.type === 'engineer' && (
+                  <div className="border border-amber-200 bg-amber-50/60 p-3">
+                    <p className="mb-1 text-xs font-black uppercase tracking-widest">Инженер: построить</p>
+                    <p className="mb-2 text-[0.65rem] uppercase text-amber-700/80">Выбери здание, затем пустую клетку рядом с инженером.</p>
+                    <div className="grid gap-2">
+                      {BUILDABLE_BUILDINGS.map((type) => (
+                        <button
+                          key={type}
+                          type="button"
+                          onClick={() => setStructureMode(type)}
+                          className={`border px-3 py-2 text-left text-xs font-bold uppercase transition ${structureMode === type ? 'border-red-600 bg-red-100 text-red-800' : 'border-amber-300 hover:bg-amber-100'}`}
+                        >
+                          {UNIT_META[type].icon} {BUILDINGS[type].label} — ${BUILDINGS[type].cost}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="border border-blue-100 bg-blue-50/50 p-3">
-                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять возле базы</p>
+                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять возле казармы</p>
                   <p className="mb-2 text-[0.65rem] uppercase text-blue-700/70">Лимит: {hiredThisTurn[activePlayer]} / {MAX_HIRES_PER_TURN}</p>
                   <div className="grid gap-2">
                     {HIREABLE_UNITS.map((unitType) => (
@@ -124,8 +146,12 @@ export default function App() {
 
             <div className="border-2 border-blue-200 bg-white/70 p-4 text-xs leading-relaxed">
               <h2 className="mb-2 text-sm font-black uppercase tracking-widest">Подсказка</h2>
-              {buildMode ? (
-                <p>Выбран найм: <b>{UNIT_META[buildMode].label}</b>. Кликни пустую клетку рядом со своей базой или HQ.</p>
+              {structureMode ? (
+                <p>Строим: <b>{BUILDINGS[structureMode].label}</b> за ${BUILDINGS[structureMode].cost}. Кликни пустую клетку рядом с инженером или своим зданием.</p>
+              ) : selectedContent?.type === 'engineer' ? (
+                <p>Инженер выбран: выбери здание в панели слева и поставь рядом. Начни с <b>Главной базы</b> — она даёт доход и нанимает новых инженеров.</p>
+              ) : buildMode ? (
+                <p>Выбран найм: <b>{UNIT_META[buildMode].label}</b>. Кликни пустую клетку рядом со своей казармой.</p>
               ) : selectedContent?.type === 'artillery' ? (
                 <p>Артиллерия выбрана: кликни любую клетку на карте противника в радиусе 4. Даже <b>?</b> можно обстрелять вслепую за 2 ОД.</p>
               ) : selectedContent?.type === 'scout' ? (

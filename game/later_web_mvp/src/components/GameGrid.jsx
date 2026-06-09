@@ -19,6 +19,11 @@ const getDisplay = (cell, activePlayer, mode, rockets) => {
       : { state: 'empty', content: null };
   }
 
+  // На карте противника не показываем свои же фигуры — иначе они «протекают» красным.
+  if (cell.content?.owner === activePlayer) {
+    return { state: 'empty', content: null };
+  }
+
   const view = cell[`${activePlayer}View`];
 
   if (view.state === 'unit' || view.state === 'building') {
@@ -43,7 +48,15 @@ const canRecruitFrom = (cell, activePlayer, unitType) => {
     && Boolean(BUILDINGS[building.type]?.hireUnits.includes(unitType));
 };
 
-const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode }) => {
+const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode }) => {
+  if (structureMode) {
+    if (mode !== 'own' || cell.content) return false;
+    return grid.some((candidate) => (
+      (candidate.content?.type === 'engineer' && candidate.content.owner === activePlayer)
+      || (candidate.content?.kind === 'building' && candidate.content.owner === activePlayer)
+    ) && areNeighbors(candidate.id, cell.id));
+  }
+
   if (buildMode) {
     if (mode !== 'own') return false;
     const hasRecruiterNear = grid.some((candidate) => canRecruitFrom(candidate, activePlayer, buildMode)
@@ -75,6 +88,7 @@ export default function GameGrid({
   activePlayer,
   selectedCell,
   buildMode,
+  structureMode,
   onCellClick,
 }) {
   const physicalRockets = rockets.filter((rocket) => rocket.status !== 'destroyed' && rocket.status !== 'escaped');
@@ -96,7 +110,7 @@ export default function GameGrid({
       <div className={`grid grid-cols-10 overflow-hidden border-2 ${mode === 'enemy' ? 'border-red-300' : 'border-blue-400'} bg-white/75 shadow-inner`}>
         {grid.map((cell) => {
           const selected = selectedCell === cell.id;
-          const actionable = canActOnCell({ mode, cell, grid, activePlayer, selectedCell, buildMode });
+          const actionable = canActOnCell({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode });
 
           return (
             <Cell

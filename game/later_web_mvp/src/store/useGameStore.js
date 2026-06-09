@@ -2,7 +2,9 @@ import { create } from 'zustand';
 import {
   ACTION_POINTS_PER_TURN,
   ARTILLERY_ACTION_COST,
+  ARTILLERY_COOLDOWN_OWN_TURNS,
   ARTILLERY_RANGE,
+  BUILDABLE_BUILDINGS,
   BUILDINGS,
   GRID_SIZE,
   HIREABLE_UNITS,
@@ -236,7 +238,10 @@ export function hasActiveBuilding(grid, owner, type) {
 }
 
 export function checkBaseWinCondition(grid, players = PLAYERS) {
-  const alivePlayers = players.filter((player) => hasBuildingSegment(grid, player, 'base') || hasBuildingSegment(grid, player, 'hq'));
+  const hasBuilder = (player) => grid.some((cell) => cell.content?.owner === player && cell.content.type === 'engineer');
+  const alivePlayers = players.filter((player) => hasBuildingSegment(grid, player, 'base')
+    || hasBuildingSegment(grid, player, 'hq')
+    || hasBuilder(player));
 
   if (alivePlayers.length === 1) {
     return { winner: alivePlayers[0], reason: 'enemy-base-destroyed' };
@@ -503,26 +508,21 @@ const withContent = (grid, id, content) => {
   grid[id] = setKnownContent({ ...grid[id], content }, content.owner, content);
 };
 
+const HOME_ROWS = { p1: [7, 8, 9], p2: [0, 1, 2] };
+
+const randomHomeCell = (player) => {
+  const rows = HOME_ROWS[player];
+  const row = rows[Math.floor(Math.random() * rows.length)];
+  const col = Math.floor(Math.random() * GRID_SIZE);
+  return row * GRID_SIZE + col;
+};
+
 const createInitialGrid = () => {
-  let grid = createEmptyGrid();
+  const grid = createEmptyGrid();
 
-  grid = placeBuilding(grid, 80, { type: 'hq', owner: 'p1' });
-  grid = placeBuilding(grid, 92, { type: 'base', owner: 'p1' });
-  grid = placeBuilding(grid, 88, { type: 'rocketSilo', owner: 'p1' });
-  withContent(grid, 72, makeUnit('infantry', 'p1'));
-  withContent(grid, 62, makeUnit('scout', 'p1'));
-  withContent(grid, 83, makeUnit('engineer', 'p1'));
-  withContent(grid, 73, makeUnit('artillery', 'p1'));
-  withContent(grid, 84, makeUnit('saboteur', 'p1'));
-
-  grid = placeBuilding(grid, 8, { type: 'hq', owner: 'p2' });
-  grid = placeBuilding(grid, 7, { type: 'base', owner: 'p2' });
-  grid = placeBuilding(grid, 0, { type: 'rocketSilo', owner: 'p2' });
-  withContent(grid, 27, makeUnit('infantry', 'p2'));
-  withContent(grid, 37, makeUnit('scout', 'p2'));
-  withContent(grid, 17, makeUnit('engineer', 'p2'));
-  withContent(grid, 26, makeUnit('artillery', 'p2'));
-  withContent(grid, 16, makeUnit('saboteur', 'p2'));
+  // Старт как в Generals/Dune: у каждого только инженер-строитель, зданий нет.
+  withContent(grid, randomHomeCell('p1'), makeUnit('engineer', 'p1'));
+  withContent(grid, randomHomeCell('p2'), makeUnit('engineer', 'p2'));
 
   return grid;
 };
@@ -562,20 +562,26 @@ export const useGameStore = create((set, get) => ({
   turn: 1,
   phase: 'ACTION',
   activePlayer: 'p1',
-  money: { p1: 40, p2: 40 },
+  money: { p1: 60, p2: 60 },
   actionPoints: { p1: ACTION_POINTS_PER_TURN, p2: ACTION_POINTS_PER_TURN },
   rocketProgress: { p1: 0, p2: 0 },
   rockets: [],
   winner: null,
   selectedCell: null,
   buildMode: null,
+  structureMode: null,
   hiredThisTurn: { p1: 0, p2: 0 },
-  log: ['Ход 1: партия началась, туман войны активен.'],
+  log: ['Ход 1: у каждого есть инженер. Постройте Главную базу.'],
   grid: createInitialGrid(),
 
   selectCell: (id, sourceMode = 'own') => {
-    const { grid, selectedCell, activePlayer, actionPoints, phase, buildMode } = get();
+    const { grid, selectedCell, activePlayer, actionPoints, phase, buildMode, structureMode } = get();
     if (phase !== 'ACTION' || get().winner) return;
+
+    if (structureMode) {
+      if (sourceMode === 'own') get().buildStructure(id);
+      return;
+    }
 
     if (buildMode) {
       if (sourceMode === 'own') get().hireUnit(id);
@@ -631,11 +637,16 @@ export const useGameStore = create((set, get) => ({
     set({ selectedCell: null });
   },
 
-  clearSelection: () => set({ selectedCell: null, buildMode: null }),
+  clearSelection: () => set({ selectedCell: null, buildMode: null, structureMode: null }),
 
   setBuildMode: (unitType) => {
     if (!HIREABLE_UNITS.includes(unitType)) return;
-    set({ buildMode: unitType, selectedCell: null });
+    set({ buildMode: unitType, selectedCell: null, structureMode: null });
+  },
+
+  setStructureMode: (buildingType) => {
+    if (!BUILDABLE_BUILDINGS.includes(buildingType)) return;
+    set({ structureMode: buildingType, buildMode: null });
   },
 
   hireUnit: (targetId) => {
@@ -658,7 +669,7 @@ export const useGameStore = create((set, get) => ({
       && areNeighbors(cell.id, targetId));
 
     if (targetCell.content || !hasFriendlyRecruiterNear) {
-      set((state) => ({ log: appendLog(state, 'нанимать можно только в пустую соседнюю клетку возле своей базы или HQ.') }));
+      set((state) => ({ log: appendLog(state, 'нанимать можно только в пустую соседнюю клетку возле своей казармы.') }));
       return;
     }
 
@@ -675,6 +686,49 @@ export const useGameStore = create((set, get) => ({
       },
       money: { ...state.money, [activePlayer]: state.money[activePlayer] - cost },
       log: appendLog(state, `${playerName(activePlayer)} нанял ${UNIT_META[buildMode].label} на ${idToCoord(targetId)} за $${cost}.`),
+    }));
+  },
+
+  buildStructure: (targetId) => {
+    const { activePlayer, structureMode, grid, money, actionPoints, phase } = get();
+    if (!structureMode || phase !== 'ACTION') return;
+
+    const cost = BUILDINGS[structureMode]?.cost ?? 0;
+
+    if (actionPoints[activePlayer] < 1) {
+      set((state) => ({ log: appendLog(state, 'не хватает ОД на стройку.') }));
+      return;
+    }
+    if (money[activePlayer] < cost) {
+      set((state) => ({ log: appendLog(state, `не хватает денег на ${BUILDINGS[structureMode].label}: нужно $${cost}.`) }));
+      return;
+    }
+
+    const nearBuilder = grid.some((cell) => cell.content?.owner === activePlayer
+      && cell.content.type === 'engineer' && areNeighbors(cell.id, targetId));
+    const nearOwnBuilding = grid.some((cell) => cell.content?.kind === 'building'
+      && cell.content.owner === activePlayer && areNeighbors(cell.id, targetId));
+
+    if (!nearBuilder && !nearOwnBuilding) {
+      set((state) => ({ log: appendLog(state, 'строить можно только рядом с инженером или своим зданием.') }));
+      return;
+    }
+
+    let newGrid;
+    try {
+      newGrid = placeBuilding(grid, targetId, { type: structureMode, owner: activePlayer });
+    } catch (error) {
+      const reason = /occupied/.test(error.message) ? 'клетки заняты' : 'выходит за край поля';
+      set((state) => ({ log: appendLog(state, `сюда не влезает ${BUILDINGS[structureMode].label}: ${reason}.`) }));
+      return;
+    }
+
+    set((state) => ({
+      grid: newGrid,
+      structureMode: null,
+      money: { ...state.money, [activePlayer]: state.money[activePlayer] - cost },
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      log: appendLog(state, `${playerName(activePlayer)} построил ${BUILDINGS[structureMode].label} на ${idToCoord(targetId)} за $${cost}.`),
     }));
   },
 
@@ -847,7 +901,7 @@ export const useGameStore = create((set, get) => ({
     }
 
     newGrid[selectedCell].content.ap = 0;
-    newGrid[selectedCell].content.cooldown = 2;
+    newGrid[selectedCell].content.cooldown = ARTILLERY_COOLDOWN_OWN_TURNS;
     const baseResult = checkBaseWinCondition(newGrid);
 
     set((state) => ({

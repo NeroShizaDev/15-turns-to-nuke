@@ -11,30 +11,43 @@ export const UNIT_META = {
   scout: { icon: '⌂', label: 'Разведчик', kind: 'unit', cost: 8, description: 'Открывает соседние клетки без выстрела вслепую.' },
   engineer: { icon: '⚙', label: 'Инженер', kind: 'unit', cost: 15, description: 'Строит и чинит поврежденные сегменты зданий.' },
   saboteur: { icon: '☻', label: 'Диверсант', kind: 'unit', cost: 15, description: 'Скрытый юнит для будущих краж ресурсов.' },
-  artillery: { icon: '▣', label: 'Артиллерия', kind: 'unit', cost: 20, range: 4, actionCost: 2, description: 'Слепой выстрел на 4 клетки, затем ход перезарядки.' },
+  artillery: { icon: '▣', label: 'Артиллерия', kind: 'unit', cost: 20, range: 4, actionCost: 2, description: 'Слепой выстрел на 4 клетки, затем 4 своих хода перезарядки.' },
   base: { icon: '□', label: 'База', kind: 'building' },
+  barracks: { icon: '▤', label: 'Казарма', kind: 'building' },
   hq: { icon: '▦', label: 'Главная база', kind: 'building' },
   rocketSilo: { icon: '▧', label: 'Ракетная шахта', kind: 'building', cost: 30 },
 };
 
 export const BUILDINGS = {
+  // Главная база — «командный центр»: даёт доход и нанимает инженеров-строителей.
   hq: {
     label: UNIT_META.hq.label,
     footprint: { width: 2, height: 2 },
     income: 20,
-    hireUnits: ['infantry', 'scout', 'engineer', 'saboteur', 'artillery'],
+    cost: 50,
+    hireUnits: ['engineer'],
+  },
+  // Казарма — производит боевые юниты.
+  barracks: {
+    label: UNIT_META.barracks.label,
+    footprint: { width: 2, height: 1 },
+    income: 0,
+    cost: 25,
+    hireUnits: ['infantry', 'scout', 'artillery', 'saboteur'],
   },
   rocketSilo: {
     label: UNIT_META.rocketSilo.label,
     footprint: { width: 2, height: 2 },
     income: 0,
+    cost: 40,
     hireUnits: [],
   },
   base: {
     label: UNIT_META.base.label,
     footprint: { width: 1, height: 1 },
     income: 5,
-    hireUnits: ['infantry', 'scout', 'engineer', 'saboteur', 'artillery'],
+    cost: 15,
+    hireUnits: [],
   },
 };
 
@@ -45,11 +58,15 @@ export const UNITS = Object.fromEntries(
 );
 
 export const buildingTypes = Object.keys(BUILDINGS);
-export const HIREABLE_UNITS = ['infantry', 'scout', 'artillery'];
+export const HIREABLE_UNITS = ['infantry', 'scout', 'engineer', 'artillery', 'saboteur'];
+// Здания, которые инженер может строить на поле.
+export const BUILDABLE_BUILDINGS = ['hq', 'barracks', 'base', 'rocketSilo'];
 export const ACTION_POINTS_PER_TURN = 6;
 export const MAX_HIRES_PER_TURN = 2;
 export const ARTILLERY_RANGE = 4;
 export const ARTILLERY_ACTION_COST = 2;
+export const ARTILLERY_COOLDOWN_OWN_TURNS = 4;
+export const SABOTEUR_ACTION_COST = 2;
 export const ROCKET_LAUNCH_TURNS = 15;
 
 export function getBuildingData(type) {
