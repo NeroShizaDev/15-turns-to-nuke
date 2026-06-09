@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+.notebook-paper::before {
+  background-image:
+    linear-gradient(rgba(59, 130, 246, 0.16) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59, 130, 246, 0.12) 1px, transparent 1px);
+  background-size: 100% 1.5rem, 1.5rem 100%;
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.notebook-paper::after {
+  background: linear-gradient(90deg, rgba(248, 113, 113, 0.45), transparent);
+  content: '';
+  inset: 0 auto 0 2.25rem;
+  pointer-events: none;
+  position: absolute;
+  width: 2px;
+}
