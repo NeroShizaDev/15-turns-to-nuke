@@ -1,6 +1,6 @@
 import GameGrid from './components/GameGrid.jsx';
 import TransitionScreen from './components/TransitionScreen.jsx';
-import { HIREABLE_UNITS, MAX_HIRES_PER_TURN, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META } from './lib/gameData.js';
+import { HIREABLE_UNITS, MAX_HIRES_PER_TURN, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META, idToCoord } from './lib/gameData.js';
 import { useGameStore } from './store/useGameStore.js';
 
 export default function App() {
@@ -11,7 +11,7 @@ export default function App() {
     money,
     actionPoints,
     rocketProgress,
-    rocketFlight,
+    rockets,
     winner,
     hiredThisTurn,
     selectedCell,
@@ -25,7 +25,7 @@ export default function App() {
   } = useGameStore();
 
   const selectedContent = selectedCell !== null ? grid[selectedCell]?.content : null;
-  const activeRocketFlight = rocketFlight[activePlayer];
+  const activeRocket = rockets.find((rocket) => rocket.owner === activePlayer);
 
   return (
     <main className="min-h-screen bg-slate-200 p-4 font-mono text-blue-950 sm:p-8">
@@ -52,8 +52,8 @@ export default function App() {
               <p className="text-[0.65rem] uppercase opacity-60">ОД</p>
             </div>
             <div>
-              <p className="text-2xl font-bold">{activeRocketFlight ? `→ ${activeRocketFlight.distanceRemaining}` : rocketProgress[activePlayer]}</p>
-              <p className="text-[0.65rem] uppercase opacity-60">{activeRocketFlight ? 'Ракета' : 'Ядерка'}</p>
+              <p className="text-2xl font-bold">{activeRocket ? `▲ ${idToCoord(activeRocket.originId)}` : rocketProgress[activePlayer]}</p>
+              <p className="text-[0.65rem] uppercase opacity-60">{activeRocket ? 'Ракета' : 'Заряд' }</p>
             </div>
             <div>
               <p className="text-2xl font-bold">{ROCKET_LAUNCH_TURNS}</p>
@@ -95,7 +95,7 @@ export default function App() {
                   Снять выбор
                 </button>
                 <div className="border border-blue-100 bg-blue-50/50 p-3">
-                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять возле базы</p>
+                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять возле казармы</p>
                   <p className="mb-2 text-[0.65rem] uppercase text-blue-700/70">Лимит: {hiredThisTurn[activePlayer]} / {MAX_HIRES_PER_TURN}</p>
                   <div className="grid gap-2">
                     {HIREABLE_UNITS.map((unitType) => (
@@ -124,15 +124,15 @@ export default function App() {
             <div className="border-2 border-blue-200 bg-white/70 p-4 text-xs leading-relaxed">
               <h2 className="mb-2 text-sm font-black uppercase tracking-widest">Подсказка</h2>
               {buildMode ? (
-                <p>Выбран найм: <b>{UNIT_META[buildMode].label}</b>. Кликни пустую клетку рядом со своей базой или HQ.</p>
+                <p>Выбран найм: <b>{UNIT_META[buildMode].label}</b>. Кликни видимо пустую клетку рядом со своей казармой.</p>
               ) : selectedContent?.type === 'artillery' ? (
                 <p>Артиллерия выбрана: кликни разведанную цель на карте противника в радиусе 4. По <b>?</b> стрелять нельзя — сначала нужен разведчик.</p>
               ) : selectedContent?.type === 'scout' ? (
                 <p>Разведчик выбран: соседняя пустая клетка будет разведана, соседний враг — атакован.</p>
               ) : selectedContent?.type === 'engineer' ? (
-                <p>Инженер выбран: кликни соседнее повреждённое своё здание, чтобы починить 1 HP за $10 и 1 ОД.</p>
+                <p>Инженер выбран: кликни соседний повреждённый сегмент своего здания, чтобы снять отметку × за $10 и 1 ОД.</p>
               ) : selectedContent?.type === 'saboteur' ? (
-                <p>Диверсант выбран: подведи его к разведанной базе/HQ врага и укради $5. Враг раскрывает его только разведкой или соседством.</p>
+                <p>Диверсант выбран: подведи его к разведанной базе/HQ врага и укради $5 за 2 ОД. Враг раскрывает его разведкой или соседством.</p>
               ) : selectedContent ? (
                 <p>{UNIT_META[selectedContent.type].label} выбран: соседняя пустая клетка — движение, соседний враг — ближняя атака.</p>
               ) : (
@@ -153,7 +153,7 @@ export default function App() {
 
             <div className="border-2 border-red-200 bg-red-50/70 p-4 text-xs leading-relaxed text-red-900">
               <p className="font-black uppercase">Правило призраков и ядерки</p>
-              <p>Старый след врага остаётся как ghost. Ракетная шкала растёт только пока у игрока жива шахта.</p>
+              <p>Старый след врага остаётся как ghost. После 15 зарядов шахта выпускает физическую ракету 2×2, которая идёт по клеткам.</p>
             </div>
           </aside>
         </div>

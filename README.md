@@ -30,8 +30,10 @@
 2. Прочитай [`docs/rules_v0.1.md`](docs/rules_v0.1.md).
 3. Возьми условные обозначения из [`docs/units.md`](docs/units.md) и [`docs/buildings.md`](docs/buildings.md).
 4. Для боёв и артиллерии сверяйся с [`docs/combat.md`](docs/combat.md).
-5. Играй по структуре хода из [`docs/turn_structure.md`](docs/turn_structure.md).
-6. Записывай спорные моменты и баланс в [`prototypes/test_match_log.md`](prototypes/test_match_log.md).
+5. Для чисел Web MVP используй [`docs/balance_web_mvp.md`](docs/balance_web_mvp.md), чтобы баланс не менялся без документа.
+6. Для готовности цифрового MVP смотри [`docs/acceptance_checklist.md`](docs/acceptance_checklist.md).
+7. Играй по структуре хода из [`docs/turn_structure.md`](docs/turn_structure.md).
+8. Записывай спорные моменты и баланс в [`prototypes/test_match_log.md`](prototypes/test_match_log.md).
 
 ## Текущий статус
 

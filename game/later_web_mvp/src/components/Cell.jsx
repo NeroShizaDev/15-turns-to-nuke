@@ -37,6 +37,12 @@ export default function Cell({ cell, display, selected, actionable, onClick, act
     >
       {state === 'unknown' ? '?' : icon}
 
+      {(display.content && typeof display.content === 'object' && display.content.damaged) && (
+        <span className="absolute inset-0 flex items-center justify-center text-2xl font-black text-red-500/75" title="Повреждённый сегмент">
+          ×
+        </span>
+      )}
+
       {isOwnSpentUnit && (
         <span
           className="absolute right-1 top-1 h-2 w-2 rounded-full border border-white bg-slate-400 shadow-sm"

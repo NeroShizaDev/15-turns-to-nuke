@@ -14,7 +14,7 @@ const getDisplay = (cell, activePlayer, mode) => {
 
   if (ownContent) return { state: 'empty', content: null };
 
-  if (view.state === 'unit' || view.state === 'building') {
+  if (view.state === 'unit' || view.state === 'building' || view.state === 'rocket') {
     return { state: 'enemy', content: { type: view.type }, turnDetected: view.turnDetected };
   }
   if (view.state === 'ghost') {
@@ -35,7 +35,8 @@ const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode 
     const isApparentlyEmpty = display.state === 'empty';
     const hasRecruiterNear = grid.some((candidate) => candidate.content
       && candidate.content.owner === activePlayer
-      && (candidate.content.type === 'base' || candidate.content.type === 'hq')
+      && candidate.content.type === 'barracks'
+      && !candidate.content.damaged
       && areNeighbors(candidate.id, cell.id));
 
     return isApparentlyEmpty && hasRecruiterNear;
@@ -49,7 +50,7 @@ const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode 
   if (selectedContent.type === 'artillery') {
     const view = cell[`${activePlayer}View`];
     const isOwnUnit = cell.content?.owner === activePlayer;
-    const isConfirmedTarget = view.state === 'unit' || view.state === 'building';
+    const isConfirmedTarget = view.state === 'unit' || view.state === 'building' || view.state === 'rocket';
     return mode === 'enemy'
       && selectedCell !== cell.id
       && !isOwnUnit
@@ -58,12 +59,11 @@ const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode 
   }
 
   if (selectedContent.type === 'engineer') {
-    const maxHp = { base: 2, hq: 4, rocketSilo: 3 }[cell.content?.type] ?? 0;
     return mode === 'own'
       && areNeighbors(selectedCell, cell.id)
       && cell.content?.owner === activePlayer
       && cell.content.kind === 'building'
-      && (cell.content.hp ?? maxHp) < maxHp;
+      && cell.content.damaged;
   }
 
   if (selectedContent.type === 'saboteur') {

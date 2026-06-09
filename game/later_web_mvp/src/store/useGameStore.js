@@ -1,38 +1,142 @@
 import { create } from 'zustand';
 import {
   ACTION_POINTS_PER_TURN,
-  GRID_SIZE,
   ARTILLERY_ACTION_COST,
+  ARTILLERY_COOLDOWN_OWN_TURNS,
   ARTILLERY_RANGE,
+  BUILDING_META,
+  ENGINEER_REPAIR_COST,
+  GRID_SIZE,
   HIREABLE_UNITS,
   MAX_HIRES_PER_TURN,
   ROCKET_LAUNCH_TURNS,
+  ROCKET_META,
+  SABOTEUR_ACTION_COST,
+  SABOTEUR_STEAL_AMOUNT,
   UNIT_META,
   areNeighbors,
   getEnemy,
   idToCoord,
   isInRange,
+  isInsideGrid,
   makeCell,
+  xyToId,
 } from '../lib/gameData.js';
 
 const playerName = (player) => (player === 'p1' ? 'Игрок 1' : 'Игрок 2');
-const BASE_INCOME = 5;
-const HQ_INCOME = 20;
-const ENGINEER_REPAIR_COST = 10;
-const SABOTEUR_STEAL_AMOUNT = 5;
 const STARTING_MONEY = 40;
-const ROCKET_FLIGHT_DISTANCE = GRID_SIZE;
-
-const BUILDING_MAX_HP = {
-  base: 2,
-  hq: 4,
-  rocketSilo: 3,
-};
+const ARTILLERY_COOLDOWN_VALUE = ARTILLERY_COOLDOWN_OWN_TURNS + 1;
 
 const cloneGrid = (grid) => grid.map((cell) => ({
   ...cell,
   content: cell.content ? { ...cell.content } : null,
+  marks: [...cell.marks],
 }));
+
+const appendLog = (state, message) => [
+  `Ход ${state.turn}: ${message}`,
+  ...state.log,
+].slice(0, 10);
+
+const normalizeTurn = (turn) => {
+  if (typeof turn === 'object') return 1;
+  return Number(turn) || 1;
+};
+
+const setKnownContent = (cell, player, content, turn = 1) => ({
+  ...cell,
+  [`${player}View`]: {
+    state: content.kind,
+    type: content.type,
+    turnDetected: normalizeTurn(turn),
+  },
+});
+
+const getFootprintIds = (originId, footprint) => {
+  const originX = originId % GRID_SIZE;
+  const originY = Math.floor(originId / GRID_SIZE);
+  const ids = [];
+
+  for (let y = 0; y < footprint.height; y += 1) {
+    for (let x = 0; x < footprint.width; x += 1) {
+      const cellX = originX + x;
+      const cellY = originY + y;
+      if (!isInsideGrid(cellX, cellY)) return [];
+      ids.push(xyToId(cellX, cellY));
+    }
+  }
+
+  return ids;
+};
+
+const makeUnit = (type, owner) => ({
+  type,
+  kind: 'unit',
+  owner,
+  ap: 1,
+  cooldown: 0,
+  hasMoved: false,
+  hidden: type === 'saboteur',
+});
+
+const placeUnit = (grid, id, type, owner, turn = 1) => {
+  const unit = makeUnit(type, owner);
+  grid[id] = setKnownContent({ ...grid[id], content: unit }, owner, unit, turn);
+};
+
+const placeBuilding = (grid, originId, type, owner, turn = 1) => {
+  const footprint = BUILDING_META[type];
+  const ids = getFootprintIds(originId, footprint);
+  if (ids.length !== footprint.width * footprint.height) return;
+  if (ids.some((id) => grid[id].content)) return;
+
+  const buildingId = `${owner}-${type}-${originId}`;
+
+  ids.forEach((id, segmentIndex) => {
+    const segment = {
+      type,
+      kind: 'building',
+      owner,
+      buildingId,
+      originId,
+      segmentIndex,
+      damaged: false,
+    };
+    grid[id] = setKnownContent({ ...grid[id], content: segment }, owner, segment, turn);
+  });
+};
+
+const createRocketSegment = (rocketId, owner, originId, segmentIndex, launchedTurn) => ({
+  type: 'nuclearRocket',
+  kind: 'rocket',
+  owner,
+  rocketId,
+  originId,
+  segmentIndex,
+  damaged: false,
+  launchedTurn,
+});
+
+const placeRocket = (grid, originId, owner, turn) => {
+  const footprint = ROCKET_META.nuclearRocket;
+  const ids = getFootprintIds(originId, footprint);
+  if (ids.length !== footprint.width * footprint.height) return null;
+  if (ids.some((id) => grid[id].content && grid[id].content.owner !== owner)) return null;
+
+  const rocketId = `${owner}-rocket-${turn}`;
+  ids.forEach((id, segmentIndex) => {
+    const segment = createRocketSegment(rocketId, owner, originId, segmentIndex, turn);
+    grid[id] = setKnownContent({ ...grid[id], content: segment }, owner, segment, turn);
+    grid[id] = setKnownContent(grid[id], getEnemy(owner), segment, turn);
+  });
+
+  return { rocketId, owner, originId, launchedTurn: turn };
+};
+
+const revealTruthFor = (cell, player, turn) => {
+  if (!cell.content) return { ...cell, [`${player}View`]: { state: 'empty', turnDetected: normalizeTurn(turn) } };
+  return setKnownContent(cell, player, cell.content, turn);
+};
 
 const applySaboteurDetection = (grid, turn) => {
   let updatedGrid = grid;
@@ -52,7 +156,7 @@ const applySaboteurDetection = (grid, turn) => {
 
       return {
         ...cell,
-        [enemyViewKey]: { state: 'unit', type: 'saboteur', turnDetected: turn },
+        [enemyViewKey]: { state: 'unit', type: 'saboteur', turnDetected: normalizeTurn(turn) },
       };
     });
   });
@@ -60,79 +164,36 @@ const applySaboteurDetection = (grid, turn) => {
   return updatedGrid;
 };
 
-const appendLog = (state, message) => [
-  `Ход ${state.turn}: ${message}`,
-  ...state.log,
-].slice(0, 10);
+const damageSegment = (cell) => {
+  if (!cell.content) return cell;
+  if (cell.content.kind !== 'building' && cell.content.kind !== 'rocket') return cell;
 
-const makeUnit = (type, owner) => ({
-  type,
-  kind: 'unit',
-  owner,
-  ap: 1,
-  cooldown: 0,
-  hasMoved: false,
-  hidden: type === 'saboteur',
-});
-
-const normalizeTurn = (turn) => {
-  if (typeof turn === 'object') return 1;
-  return Number(turn) || 1;
-};
-
-const setKnownContent = (cell, player, content, turn = 1) => ({
-  ...cell,
-  [`${player}View`]: { state: content.kind, type: content.type, turnDetected: normalizeTurn(turn) },
-});
-
-const withContent = (grid, id, content) => {
-  grid[id] = setKnownContent({ ...grid[id], content }, content.owner, content, 1);
-};
-
-const createInitialGrid = () => {
-  const grid = Array.from({ length: 100 }, (_, id) => makeCell(id));
-
-  withContent(grid, 81, { type: 'hq', kind: 'building', owner: 'p1', hp: 4 });
-  withContent(grid, 91, { type: 'base', kind: 'building', owner: 'p1', hp: 2 });
-  withContent(grid, 90, { type: 'rocketSilo', kind: 'building', owner: 'p1', hp: 3 });
-  withContent(grid, 72, makeUnit('infantry', 'p1'));
-  withContent(grid, 62, makeUnit('scout', 'p1'));
-  withContent(grid, 83, makeUnit('engineer', 'p1'));
-  withContent(grid, 73, makeUnit('artillery', 'p1'));
-  withContent(grid, 84, makeUnit('saboteur', 'p1'));
-
-  withContent(grid, 18, { type: 'hq', kind: 'building', owner: 'p2', hp: 4 });
-  withContent(grid, 8, { type: 'base', kind: 'building', owner: 'p2', hp: 2 });
-  withContent(grid, 9, { type: 'rocketSilo', kind: 'building', owner: 'p2', hp: 3 });
-  withContent(grid, 27, makeUnit('infantry', 'p2'));
-  withContent(grid, 37, makeUnit('scout', 'p2'));
-  withContent(grid, 17, makeUnit('engineer', 'p2'));
-  withContent(grid, 26, makeUnit('artillery', 'p2'));
-  withContent(grid, 16, makeUnit('saboteur', 'p2'));
-
-
-  return grid;
-};
-
-const revealTruthFor = (cell, player, turn) => {
-  if (!cell.content) return { ...cell, [`${player}View`]: { state: 'empty', turnDetected: turn } };
-  return setKnownContent(cell, player, cell.content, turn);
-};
-
-const damageOrDestroyBuilding = (cell) => {
-  const nextHp = (cell.content.hp ?? 1) - 1;
-  if (nextHp <= 0) {
-    return { ...cell, content: null };
+  if (!cell.content.damaged) {
+    return {
+      ...cell,
+      content: { ...cell.content, damaged: true },
+      marks: [...cell.marks, '×'],
+    };
   }
-  return { ...cell, content: { ...cell.content, hp: nextHp } };
+
+  return {
+    ...cell,
+    content: null,
+    marks: [...cell.marks, '×'],
+  };
 };
 
-const hasActiveRocketSilo = (grid, player) => grid.some(
-  (cell) => cell.content?.owner === player && cell.content.type === 'rocketSilo',
+const hasStructure = (grid, player, type) => grid.some(
+  (cell) => cell.content?.owner === player && cell.content.type === type,
 );
 
-const canHireFrom = (cell, player) => cell.content?.owner === player
-  && (cell.content.type === 'base' || cell.content.type === 'hq');
+const hasProductionBuilding = (grid, player) => grid.some(
+  (cell) => cell.content?.owner === player
+    && cell.content.type === 'barracks'
+    && !cell.content.damaged,
+);
+
+const hasActiveRocketSilo = (grid, player) => hasStructure(grid, player, 'rocketSilo');
 
 const checkBaseWinCondition = (grid) => {
   const hasP1Bases = grid.some((cell) => cell.content?.owner === 'p1'
@@ -147,17 +208,107 @@ const checkBaseWinCondition = (grid) => {
 
 const isConfirmedTarget = (cell, player) => {
   const viewState = cell[`${player}View`].state;
-  return viewState === 'unit' || viewState === 'building';
+  return viewState === 'unit' || viewState === 'building' || viewState === 'rocket';
+};
+
+const createInitialGrid = () => {
+  const grid = Array.from({ length: 100 }, (_, id) => makeCell(id));
+
+  placeBuilding(grid, 80, 'hq', 'p1');
+  placeBuilding(grid, 92, 'base', 'p1');
+  placeBuilding(grid, 88, 'rocketSilo', 'p1');
+  placeBuilding(grid, 70, 'barracks', 'p1');
+  placeUnit(grid, 72, 'infantry', 'p1');
+  placeUnit(grid, 62, 'scout', 'p1');
+  placeUnit(grid, 83, 'engineer', 'p1');
+  placeUnit(grid, 73, 'artillery', 'p1');
+  placeUnit(grid, 84, 'saboteur', 'p1');
+
+  placeBuilding(grid, 0, 'hq', 'p2');
+  placeBuilding(grid, 7, 'base', 'p2');
+  placeBuilding(grid, 8, 'rocketSilo', 'p2');
+  placeBuilding(grid, 28, 'barracks', 'p2');
+  placeUnit(grid, 27, 'infantry', 'p2');
+  placeUnit(grid, 37, 'scout', 'p2');
+  placeUnit(grid, 17, 'engineer', 'p2');
+  placeUnit(grid, 26, 'artillery', 'p2');
+  placeUnit(grid, 16, 'saboteur', 'p2');
+
+  return grid;
+};
+
+const getIncome = (grid, player) => {
+  const counted = new Set();
+  return grid.reduce((acc, cell) => {
+    const content = cell.content;
+    if (content?.owner !== player || content.kind !== 'building') return acc;
+    if (counted.has(content.buildingId)) return acc;
+    counted.add(content.buildingId);
+    return acc + (BUILDING_META[content.type]?.income ?? 0);
+  }, 0);
+};
+
+const getRocketOrigin = (grid, player) => {
+  const silo = grid.find((cell) => cell.content?.owner === player && cell.content.type === 'rocketSilo');
+  return silo?.content?.originId ?? null;
+};
+
+const getRocketCells = (grid, rocketId) => grid.filter((cell) => cell.content?.rocketId === rocketId);
+
+const moveRocket = (grid, rocket, turn) => {
+  const currentCells = getRocketCells(grid, rocket.rocketId);
+  if (currentCells.length === 0) return { grid, rocket: null, winner: null, message: 'ракета сбита.' };
+
+  const dy = rocket.owner === 'p1' ? -1 : 1;
+  const nextPositions = currentCells.map((cell) => ({ x: cell.x, y: cell.y + dy, oldId: cell.id }));
+  const reachedEdge = nextPositions.some(({ y }) => y < 0 || y >= GRID_SIZE);
+
+  if (reachedEdge) {
+    const clearedGrid = grid.map((cell) => (
+      cell.content?.rocketId === rocket.rocketId ? { ...cell, content: null } : cell
+    ));
+    return {
+      grid: clearedGrid,
+      rocket: null,
+      winner: rocket.owner,
+      message: `${playerName(rocket.owner)} довёл ядерную ракету до края карты противника.`,
+    };
+  }
+
+  const nextIds = nextPositions.map(({ x, y }) => xyToId(x, y));
+  if (nextIds.some((id) => grid[id].content && grid[id].content.rocketId !== rocket.rocketId)) {
+    return { grid, rocket, winner: null, message: 'ракета заблокирована целью на траектории.' };
+  }
+
+  const newOriginId = Math.min(...nextIds);
+  const nextByOldId = new Map(nextPositions.map((position) => [position.oldId, xyToId(position.x, position.y)]));
+  let movedGrid = grid.map((cell) => (
+    cell.content?.rocketId === rocket.rocketId ? { ...cell, content: null } : cell
+  ));
+
+  currentCells.forEach((cell) => {
+    const nextId = nextByOldId.get(cell.id);
+    const segment = { ...cell.content, originId: newOriginId };
+    movedGrid[nextId] = setKnownContent({ ...movedGrid[nextId], content: segment }, rocket.owner, segment, turn);
+    movedGrid[nextId] = setKnownContent(movedGrid[nextId], getEnemy(rocket.owner), segment, turn);
+  });
+
+  return {
+    grid: movedGrid,
+    rocket: { ...rocket, originId: newOriginId },
+    winner: null,
+    message: `Ракета ${playerName(rocket.owner)} сдвинулась на 1 клетку.`,
+  };
 };
 
 export const useGameStore = create((set, get) => ({
   turn: 1,
   phase: 'ACTION',
   activePlayer: 'p1',
-  money: { p1: STARTING_MONEY + BASE_INCOME + HQ_INCOME, p2: STARTING_MONEY },
+  money: { p1: STARTING_MONEY + getIncome(createInitialGrid(), 'p1'), p2: STARTING_MONEY },
   actionPoints: { p1: ACTION_POINTS_PER_TURN, p2: ACTION_POINTS_PER_TURN },
   rocketProgress: { p1: 1, p2: 0 },
-  rocketFlight: { p1: null, p2: null },
+  rockets: [],
   winner: null,
   selectedCell: null,
   buildMode: null,
@@ -254,6 +405,11 @@ export const useGameStore = create((set, get) => ({
       return;
     }
 
+    if (!hasProductionBuilding(grid, activePlayer)) {
+      set((state) => ({ log: appendLog(state, 'для найма нужна живая казарма.') }));
+      return;
+    }
+
     const cost = UNIT_META[buildMode].cost;
     if (money[activePlayer] < cost) {
       set((state) => ({ log: appendLog(state, `не хватает денег на ${UNIT_META[buildMode].label}: нужно $${cost}.`) }));
@@ -261,10 +417,13 @@ export const useGameStore = create((set, get) => ({
     }
 
     const targetCell = grid[targetId];
-    const hasFriendlyRecruiterNear = grid.some((cell) => canHireFrom(cell, activePlayer) && areNeighbors(cell.id, targetId));
+    const hasFriendlyRecruiterNear = grid.some((cell) => cell.content?.owner === activePlayer
+      && cell.content.type === 'barracks'
+      && !cell.content.damaged
+      && areNeighbors(cell.id, targetId));
 
     if (!hasFriendlyRecruiterNear) {
-      set((state) => ({ log: appendLog(state, 'нанимать можно только рядом со своей базой или HQ.') }));
+      set((state) => ({ log: appendLog(state, 'нанимать можно только рядом со своей казармой.') }));
       return;
     }
 
@@ -325,6 +484,7 @@ export const useGameStore = create((set, get) => ({
     const toCell = grid[toId];
 
     if (!fromCell.content || fromCell.content.owner !== activePlayer) return;
+    if (fromCell.content.kind !== 'unit') return;
     if (fromCell.content.ap <= 0 || actionPoints[activePlayer] <= 0 || (fromCell.content.cooldown ?? 0) > 0) return;
     if (!areNeighbors(fromId, toId) || toCell.content) return;
 
@@ -367,12 +527,11 @@ export const useGameStore = create((set, get) => ({
     const targetCell = grid[targetId];
 
     if (!attackerCell?.content || attackerCell.content.owner !== activePlayer) return;
+    if (attackerCell.content.kind !== 'unit') return;
     if (attackerCell.content.ap <= 0 || actionPoints[activePlayer] <= 0 || (attackerCell.content.cooldown ?? 0) > 0) return;
     if (!areNeighbors(selectedCell, targetId)) return;
     if (!targetCell.content || targetCell.content.owner === activePlayer) return;
-
-    const targetViewState = targetCell[`${activePlayer}View`].state;
-    if (targetViewState !== 'unit' && targetViewState !== 'building') return;
+    if (!isConfirmedTarget(targetCell, activePlayer)) return;
 
     const newGrid = cloneGrid(grid);
     const attackerType = attackerCell.content.type;
@@ -390,10 +549,12 @@ export const useGameStore = create((set, get) => ({
         newGrid[selectedCell][`${getEnemy(activePlayer)}View`] = { state: 'empty', turnDetected: turn };
         message += ' Ответный удар: атакующий тоже погиб.';
       }
-    } else {
-      const damaged = damageOrDestroyBuilding(newGrid[targetId]);
-      newGrid[targetId] = revealTruthFor(damaged, activePlayer, turn);
-      message += damaged.content ? ` Прочность: ${damaged.content.hp}.` : ' Здание разрушено.';
+    } else if (targetCell.content.kind === 'building' || targetCell.content.kind === 'rocket') {
+      newGrid[targetId] = damageSegment(newGrid[targetId]);
+      newGrid[targetId] = revealTruthFor(newGrid[targetId], activePlayer, turn);
+      message += newGrid[targetId].content
+        ? ` Сегмент ${UNIT_META[targetType].label} повреждён.`
+        : ` Сегмент ${UNIT_META[targetType].label} уничтожен.`;
     }
 
     if (newGrid[selectedCell].content) newGrid[selectedCell].content.ap = 0;
@@ -422,15 +583,13 @@ export const useGameStore = create((set, get) => ({
 
     const building = targetCell.content;
     if (!building || building.owner !== activePlayer || building.kind !== 'building') return;
-
-    const maxHp = BUILDING_MAX_HP[building.type] ?? 1;
-    if ((building.hp ?? maxHp) >= maxHp) {
-      set((state) => ({ log: appendLog(state, `${UNIT_META[building.type].label} уже полностью исправно.`) }));
+    if (!building.damaged) {
+      set((state) => ({ log: appendLog(state, `${UNIT_META[building.type].label} на ${idToCoord(buildingId)} не повреждён.`) }));
       return;
     }
 
     if (building.lastRepaired === turn) {
-      set((state) => ({ log: appendLog(state, 'Это здание уже чинили в этом ходу.') }));
+      set((state) => ({ log: appendLog(state, 'это здание уже чинили в этом ходу.') }));
       return;
     }
 
@@ -442,7 +601,7 @@ export const useGameStore = create((set, get) => ({
     const newGrid = cloneGrid(grid);
     newGrid[buildingId] = {
       ...newGrid[buildingId],
-      content: { ...newGrid[buildingId].content, hp: (building.hp ?? maxHp) + 1, lastRepaired: turn },
+      content: { ...newGrid[buildingId].content, damaged: false, lastRepaired: turn },
     };
     newGrid[selectedCell] = {
       ...newGrid[selectedCell],
@@ -454,7 +613,7 @@ export const useGameStore = create((set, get) => ({
       selectedCell: null,
       money: { ...state.money, [activePlayer]: state.money[activePlayer] - ENGINEER_REPAIR_COST },
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
-      log: appendLog(state, `Инженер починил ${UNIT_META[building.type].label} на ${idToCoord(buildingId)} за $${ENGINEER_REPAIR_COST} (HP: ${(building.hp ?? maxHp) + 1}/${maxHp}).`),
+      log: appendLog(state, `Инженер починил сегмент ${UNIT_META[building.type].label} на ${idToCoord(buildingId)} за $${ENGINEER_REPAIR_COST}.`),
     }));
   },
 
@@ -464,7 +623,7 @@ export const useGameStore = create((set, get) => ({
     const targetCell = grid[targetId];
 
     if (!saboteurCell?.content || saboteurCell.content.owner !== activePlayer || saboteurCell.content.type !== 'saboteur') return;
-    if (saboteurCell.content.ap <= 0 || actionPoints[activePlayer] < 1) return;
+    if (saboteurCell.content.ap <= 0 || actionPoints[activePlayer] < SABOTEUR_ACTION_COST) return;
     if (!areNeighbors(selectedCell, targetId)) return;
     if (!targetCell.content || targetCell.content.owner === activePlayer) return;
     if (targetCell.content.type !== 'base' && targetCell.content.type !== 'hq') return;
@@ -492,13 +651,13 @@ export const useGameStore = create((set, get) => ({
         [activePlayer]: state.money[activePlayer] + SABOTEUR_STEAL_AMOUNT,
         [enemy]: state.money[enemy] - SABOTEUR_STEAL_AMOUNT,
       },
-      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - SABOTEUR_ACTION_COST },
       log: appendLog(state, `Диверсант украл $${SABOTEUR_STEAL_AMOUNT} у ${playerName(enemy)}.`),
     }));
   },
 
   artilleryFire: (targetId) => {
-    const { grid, activePlayer, actionPoints, selectedCell, turn } = get();
+    const { grid, activePlayer, actionPoints, selectedCell, turn, rockets } = get();
     const artilleryCell = selectedCell !== null ? grid[selectedCell] : null;
     const targetCell = grid[targetId];
 
@@ -529,21 +688,36 @@ export const useGameStore = create((set, get) => ({
       message += ` Попадание: уничтожен ${UNIT_META[targetCell.content.type].label}.`;
       newGrid[targetId].content = null;
       newGrid[targetId][`${activePlayer}View`] = { state: 'empty', turnDetected: turn };
-    } else {
-      const damaged = damageOrDestroyBuilding(newGrid[targetId]);
-      newGrid[targetId] = revealTruthFor(damaged, activePlayer, turn);
-      message += damaged.content
-        ? ` Попадание по зданию ${UNIT_META[targetCell.content.type].label}, прочность ${damaged.content.hp}.`
-        : ` Попадание: ${UNIT_META[targetCell.content.type].label} разрушена.`;
+    } else if (targetCell.content.kind === 'building' || targetCell.content.kind === 'rocket') {
+      const rocketId = targetCell.content.rocketId;
+      newGrid[targetId] = damageSegment(newGrid[targetId]);
+      newGrid[targetId] = revealTruthFor(newGrid[targetId], activePlayer, turn);
+      message += newGrid[targetId].content
+        ? ` Сегмент ${UNIT_META[targetCell.content.type].label} повреждён.`
+        : ` Сегмент ${UNIT_META[targetCell.content.type].label} уничтожен.`;
+
+      if (rocketId) {
+        const rocketCells = getRocketCells(newGrid, rocketId);
+        const allRocketCellsDamaged = rocketCells.length > 0 && rocketCells.every((cell) => cell.content?.damaged);
+        if (rocketCells.length === 0 || allRocketCellsDamaged) {
+          rocketCells.forEach((cell) => {
+            newGrid[cell.id] = { ...newGrid[cell.id], content: null };
+          });
+          message += ' Ядерная ракета сбита.';
+        }
+      }
     }
 
     newGrid[selectedCell].content.ap = 0;
-    newGrid[selectedCell].content.cooldown = 2;
+    newGrid[selectedCell].content.cooldown = ARTILLERY_COOLDOWN_VALUE;
 
     const newWinner = checkBaseWinCondition(newGrid);
+    const activeRocketIds = new Set(newGrid.filter((cell) => cell.content?.kind === 'rocket').map((cell) => cell.content.rocketId));
+    const nextRockets = rockets.filter((rocket) => activeRocketIds.has(rocket.rocketId));
 
     set((state) => ({
       grid: newGrid,
+      rockets: nextRockets,
       selectedCell: null,
       winner: newWinner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - ARTILLERY_ACTION_COST },
@@ -562,7 +736,7 @@ export const useGameStore = create((set, get) => ({
 
     set((state) => {
       const nextTurnNumber = shouldAdvanceTurn ? state.turn + 1 : state.turn;
-      const resetGrid = state.grid.map((cell) => {
+      let nextGrid = state.grid.map((cell) => {
         if (cell.content?.owner !== nextPlayer || cell.content.kind !== 'unit') return cell;
         const nextCooldown = Math.max((cell.content.cooldown ?? 0) - 1, 0);
         return {
@@ -577,38 +751,44 @@ export const useGameStore = create((set, get) => ({
       });
 
       const rocketProgress = { ...state.rocketProgress };
-      const rocketFlight = { ...state.rocketFlight };
+      let rockets = [...state.rockets];
       let newWinner = state.winner;
       let rocketMessage = '';
 
-      if (rocketFlight[nextPlayer]) {
-        const distanceRemaining = rocketFlight[nextPlayer].distanceRemaining - 1;
-        rocketFlight[nextPlayer] = { ...rocketFlight[nextPlayer], distanceRemaining };
-        rocketMessage = `Ракета ${playerName(nextPlayer)} летит к краю карты: осталось ${Math.max(distanceRemaining, 0)} клеток.`;
+      rockets = rockets.map((rocket) => {
+        if (rocket.owner !== nextPlayer || newWinner) return rocket;
+        const result = moveRocket(nextGrid, rocket, nextTurnNumber);
+        nextGrid = result.grid;
+        rocketMessage = result.message;
+        if (result.winner) newWinner = result.winner;
+        return result.rocket;
+      }).filter(Boolean);
 
-        if (distanceRemaining <= 0) {
-          newWinner = nextPlayer;
-          rocketMessage = `${playerName(nextPlayer)} довёл ядерную ракету до края карты противника.`;
-        }
-      } else {
-        const rocketIsCharging = hasActiveRocketSilo(resetGrid, nextPlayer);
+      if (!newWinner && !rockets.some((rocket) => rocket.owner === nextPlayer)) {
+        const rocketIsCharging = hasActiveRocketSilo(nextGrid, nextPlayer);
         const nextRocketValue = rocketIsCharging
           ? Math.min(rocketProgress[nextPlayer] + 1, ROCKET_LAUNCH_TURNS)
           : rocketProgress[nextPlayer];
         rocketProgress[nextPlayer] = nextRocketValue;
 
         if (rocketIsCharging && nextRocketValue >= ROCKET_LAUNCH_TURNS) {
-          rocketFlight[nextPlayer] = { distanceRemaining: ROCKET_FLIGHT_DISTANCE, launchedTurn: nextTurnNumber };
-          rocketMessage = `Ракетная шахта ${playerName(nextPlayer)} запустила ядерку: до края ${ROCKET_FLIGHT_DISTANCE} клеток.`;
+          const originId = getRocketOrigin(nextGrid, nextPlayer);
+          const newRocket = originId === null ? null : placeRocket(nextGrid, originId, nextPlayer, nextTurnNumber);
+          if (newRocket) {
+            rockets = [...rockets, newRocket];
+            rocketMessage = `Ракетная шахта ${playerName(nextPlayer)} запустила физическую ядерку 2×2.`;
+          } else {
+            rocketMessage = `Ракетная шахта ${playerName(nextPlayer)} готова, но стартовые клетки ракеты заблокированы.`;
+          }
         } else {
           rocketMessage = rocketIsCharging
             ? `Ракетная шахта ${playerName(nextPlayer)} заряжается: ${nextRocketValue}/${ROCKET_LAUNCH_TURNS}.`
-            : `у ${playerName(nextPlayer)} нет активной шахты — ядерный таймер стоит.`;
+            : `у ${playerName(nextPlayer)} нет активной шахты — ядерный прогресс стоит.`;
         }
       }
 
       return {
-        grid: resetGrid,
+        grid: nextGrid,
         turn: nextTurnNumber,
         activePlayer: nextPlayer,
         selectedCell: null,
@@ -617,7 +797,7 @@ export const useGameStore = create((set, get) => ({
         actionPoints: { ...state.actionPoints, [nextPlayer]: ACTION_POINTS_PER_TURN },
         hiredThisTurn: { ...state.hiredThisTurn, [nextPlayer]: 0 },
         rocketProgress,
-        rocketFlight,
+        rockets,
         winner: newWinner,
         log: appendLog({ ...state, turn: nextTurnNumber }, newWinner
           ? `${rocketMessage} Партия окончена!`
@@ -628,19 +808,13 @@ export const useGameStore = create((set, get) => ({
     get().applyIncome(nextPlayer);
   },
 
-
-  startActionPhase: () => set((state) => ({ phase: state.winner ? 'ACTION' : 'ACTION' })),
+  startActionPhase: () => set({ phase: 'ACTION' }),
 
   applyIncome: (player = get().activePlayer) => {
     const { grid, winner } = get();
     if (winner) return;
 
-    const income = grid.reduce((acc, cell) => {
-      if (cell.content?.owner !== player) return acc;
-      if (cell.content.type === 'base') return acc + BASE_INCOME;
-      if (cell.content.type === 'hq') return acc + HQ_INCOME;
-      return acc;
-    }, 0);
+    const income = getIncome(grid, player);
 
     set((state) => ({
       money: { ...state.money, [player]: state.money[player] + income },
