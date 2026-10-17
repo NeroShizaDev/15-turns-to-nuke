@@ -1,4 +1,4 @@
-import { UNIT_META } from '../lib/gameData.js';
+import { HARVESTER_CAPACITY, UNIT_META } from '../lib/gameData.js';
 
 const getBuildingClasses = (segment) => {
   if (segment?.kind !== 'building') {
@@ -49,6 +49,14 @@ const resolveLabel = (content) => {
     return `${content.owner} ${content.rocketId}, ${content.rocketSegment}${content.damaged ? ', damaged' : ''}`;
   }
 
+  if (content.kind === 'ruin') {
+    return `Руины, обломков на $${content.salvage}`;
+  }
+
+  if (content.type === 'harvester' && content.cargo !== undefined) {
+    return `Сборщик, груз $${content.cargo}/${HARVESTER_CAPACITY}`;
+  }
+
   const label = UNIT_META[content.type]?.label ?? content.type;
   if (content.kind !== 'building') return label;
 
@@ -69,6 +77,7 @@ export default function Cell({ cell, display, selected, actionable, onClick, act
     own: 'text-blue-950 bg-blue-50/70',
     enemy: 'text-red-700 bg-red-50/80',
     ghost: 'text-slate-500 bg-slate-100/70 opacity-70 italic',
+    ruin: 'text-amber-800 bg-amber-100/70',
     unknown: 'text-slate-300 bg-slate-50/80',
     empty: 'text-blue-200 bg-white/40',
   }[state] ?? 'text-blue-900 bg-white/40';
@@ -103,6 +112,18 @@ export default function Cell({ cell, display, selected, actionable, onClick, act
       {cell.content?.owner === activePlayer && cell.content?.cooldown > 0 && (
         <span className="absolute left-0.5 top-0.5 text-[0.55rem] leading-none text-red-500">
           CD{cell.content.cooldown}
+        </span>
+      )}
+
+      {display.content?.kind === 'ruin' && (
+        <span className="absolute bottom-0.5 left-0.5 text-[0.55rem] font-bold leading-none text-amber-700">
+          ${display.content.salvage}
+        </span>
+      )}
+
+      {display.content?.type === 'harvester' && display.content.cargo > 0 && (
+        <span className="absolute bottom-0.5 left-0.5 text-[0.55rem] font-bold leading-none text-amber-700">
+          {display.content.cargo}/{HARVESTER_CAPACITY}
         </span>
       )}
 

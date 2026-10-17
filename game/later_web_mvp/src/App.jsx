@@ -1,7 +1,24 @@
 import GameGrid from './components/GameGrid.jsx';
 import TransitionScreen from './components/TransitionScreen.jsx';
-import { BUILDABLE_BUILDINGS, BUILDINGS, HIREABLE_UNITS, MAX_HIRES_PER_TURN, PLAYER_LABELS, ROCKET_LAUNCH_TURNS, UNIT_META } from './lib/gameData.js';
-import { useGameStore } from './store/useGameStore.js';
+import {
+  BUILDABLE_BUILDINGS,
+  BUILDINGS,
+  HARVESTER_CAPACITY,
+  HIREABLE_UNITS,
+  MAX_HIRES_PER_TURN,
+  PLAYER_LABELS,
+  REPAIR_COST_PER_SEGMENT,
+  ROCKET_LAUNCH_TURNS,
+  SABOTEUR_STEAL,
+  UNIT_META,
+} from './lib/gameData.js';
+import { getStorageCapacity, useGameStore } from './store/useGameStore.js';
+
+// Где нанимается юнит: подпись берётся из hireUnits зданий.
+const HIRED_AT = Object.fromEntries(HIREABLE_UNITS.map((unitType) => [
+  unitType,
+  Object.values(BUILDINGS).filter((building) => building.hireUnits.includes(unitType)).map((building) => building.label).join(' / '),
+]));
 
 export default function App() {
   const {
@@ -17,6 +34,7 @@ export default function App() {
     selectedCell,
     buildMode,
     structureMode,
+    engineerMode,
     log,
     grid,
     selectCell,
@@ -24,9 +42,12 @@ export default function App() {
     clearSelection,
     setBuildMode,
     setStructureMode,
+    setEngineerMode,
   } = useGameStore();
 
   const selectedContent = selectedCell !== null ? grid[selectedCell]?.content : null;
+  const storageCapacity = getStorageCapacity(grid, activePlayer);
+  const isStorageFull = money[activePlayer] >= storageCapacity;
 
   return (
     <main className="min-h-screen bg-slate-200 p-4 font-mono text-blue-950 sm:p-8">
@@ -45,8 +66,11 @@ export default function App() {
           </div>
           <div className="grid grid-cols-2 gap-4 text-right sm:grid-cols-4">
             <div>
-              <p className="text-2xl font-bold">$ {money[activePlayer]}</p>
-              <p className="text-[0.65rem] uppercase opacity-60">Бюджет</p>
+              <p className="text-2xl font-bold">
+                $ {money[activePlayer]}
+                <span className={`text-sm ${isStorageFull ? 'text-red-600' : 'opacity-60'}`}> / {storageCapacity}</span>
+              </p>
+              <p className="text-[0.65rem] uppercase opacity-60">Деньги / хранилище</p>
             </div>
             <div>
               <p className="text-2xl font-bold">{actionPoints[activePlayer]}</p>
@@ -73,6 +97,7 @@ export default function App() {
             selectedCell={selectedCell}
             buildMode={buildMode}
             structureMode={structureMode}
+            engineerMode={engineerMode}
             onCellClick={selectCell}
           />
 
@@ -85,6 +110,7 @@ export default function App() {
             selectedCell={selectedCell}
             buildMode={buildMode}
             structureMode={structureMode}
+            engineerMode={engineerMode}
             onCellClick={selectCell}
           />
 
@@ -112,13 +138,24 @@ export default function App() {
                           className={`border px-3 py-2 text-left text-xs font-bold uppercase transition ${structureMode === type ? 'border-red-600 bg-red-100 text-red-800' : 'border-amber-300 hover:bg-amber-100'}`}
                         >
                           {UNIT_META[type].icon} {BUILDINGS[type].label} — ${BUILDINGS[type].cost}
+                          <span className="block text-[0.6rem] font-normal normal-case opacity-70">
+                            {BUILDINGS[type].income > 0 ? `+$${BUILDINGS[type].income}/ход · ` : ''}хранит {BUILDINGS[type].storage}
+                            {BUILDINGS[type].receivesCargo ? ' · приём груза' : ''}
+                          </span>
                         </button>
                       ))}
+                      <button
+                        type="button"
+                        onClick={() => setEngineerMode('dismantle')}
+                        className={`border px-3 py-2 text-left text-xs font-bold uppercase transition ${engineerMode === 'dismantle' ? 'border-red-600 bg-red-100 text-red-800' : 'border-amber-300 hover:bg-amber-100'}`}
+                      >
+                        ✂ Разобрать здание — вернуть 50%
+                      </button>
                     </div>
                   </div>
                 )}
                 <div className="border border-blue-100 bg-blue-50/50 p-3">
-                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять возле казармы</p>
+                  <p className="mb-1 text-xs font-black uppercase tracking-widest">Нанять у своих зданий</p>
                   <p className="mb-2 text-[0.65rem] uppercase text-blue-700/70">Лимит: {hiredThisTurn[activePlayer]} / {MAX_HIRES_PER_TURN}</p>
                   <div className="grid gap-2">
                     {HIREABLE_UNITS.map((unitType) => (
@@ -129,6 +166,7 @@ export default function App() {
                         className={`border px-3 py-2 text-left text-xs font-bold uppercase transition ${buildMode === unitType ? 'border-red-600 bg-red-100 text-red-800' : 'border-blue-300 hover:bg-blue-100'}`}
                       >
                         {UNIT_META[unitType].icon} {UNIT_META[unitType].label} — ${UNIT_META[unitType].cost}
+                        <span className="block text-[0.6rem] font-normal normal-case opacity-70">у: {HIRED_AT[unitType]}</span>
                       </button>
                     ))}
                   </div>
@@ -148,10 +186,16 @@ export default function App() {
               <h2 className="mb-2 text-sm font-black uppercase tracking-widest">Подсказка</h2>
               {structureMode ? (
                 <p>Строим: <b>{BUILDINGS[structureMode].label}</b> за ${BUILDINGS[structureMode].cost}. Кликни пустую клетку рядом с инженером или своим зданием.</p>
+              ) : engineerMode === 'dismantle' ? (
+                <p>Разборка: кликни своё здание рядом с инженером. Вернётся 50% цены целых сегментов и 25% повреждённых; что не влезет в хранилища — останется руинами.</p>
               ) : selectedContent?.type === 'engineer' ? (
-                <p>Инженер выбран: выбери здание в панели слева и поставь рядом. Начни с <b>Главной базы</b> — она даёт доход и нанимает новых инженеров.</p>
+                <p>Инженер выбран: выбери здание в панели и поставь рядом. Начни с <b>Главной базы</b> — она даёт доход и хранит деньги. Клик по своему повреждённому сегменту рядом — ремонт за ${REPAIR_COST_PER_SEGMENT}.</p>
               ) : buildMode ? (
-                <p>Выбран найм: <b>{UNIT_META[buildMode].label}</b>. Кликни пустую клетку рядом со своей казармой.</p>
+                <p>Выбран найм: <b>{UNIT_META[buildMode].label}</b>. Кликни пустую клетку рядом с целым зданием: {HIRED_AT[buildMode]}.</p>
+              ) : selectedContent?.type === 'harvester' ? (
+                <p>Сборщик (груз {selectedContent.cargo ?? 0}/{HARVESTER_CAPACITY}): кликни соседние руины <b>※</b> — погрузка за 1 ОД. Рядом со своей Главной базой или Складом груз выгружается сам.</p>
+              ) : selectedContent?.type === 'saboteur' ? (
+                <p>Диверсант выбран: клик по соседнему вражескому зданию — кража до ${SABOTEUR_STEAL} из хранилища за 2 ОД. После кражи жертва тебя заметит.</p>
               ) : selectedContent?.type === 'artillery' ? (
                 <p>Артиллерия выбрана: кликни любую клетку на карте противника в радиусе 4. Даже <b>?</b> можно обстрелять вслепую за 2 ОД.</p>
               ) : selectedContent?.type === 'scout' ? (
@@ -172,6 +216,11 @@ export default function App() {
                   </li>
                 ))}
               </ol>
+            </div>
+
+            <div className="border-2 border-amber-200 bg-amber-50/70 p-4 text-xs leading-relaxed text-amber-900">
+              <p className="font-black uppercase">Экономика: здания — это спайс</p>
+              <p>Деньги лежат в зданиях: доход сверх хранилища сгорает. Разрушенный сегмент становится руинами <b>※</b> с его ценой и высыпавшимися деньгами — их вывозит Сборщик любой стороны.</p>
             </div>
 
             <div className="border-2 border-red-200 bg-red-50/70 p-4 text-xs leading-relaxed text-red-900">

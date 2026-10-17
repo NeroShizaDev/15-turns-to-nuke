@@ -11,6 +11,11 @@ const getDisplay = (cell, activePlayer, mode, rockets) => {
     };
   }
 
+  // Руины нейтральные и видны обоим игрокам на обеих картах.
+  if (cell.content?.kind === 'ruin') {
+    return { state: 'ruin', content: cell.content };
+  }
+
   const ownContent = cell.content?.owner === activePlayer ? cell.content : null;
 
   if (mode === 'own') {
@@ -48,13 +53,22 @@ const canRecruitFrom = (cell, activePlayer, unitType) => {
     && Boolean(BUILDINGS[building.type]?.hireUnits.includes(unitType));
 };
 
-const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode }) => {
+const isOwnBuilding = (cell, activePlayer) => cell.content?.kind === 'building' && cell.content.owner === activePlayer;
+
+const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode, engineerMode }) => {
   if (structureMode) {
     if (mode !== 'own' || cell.content) return false;
     return grid.some((candidate) => (
       (candidate.content?.type === 'engineer' && candidate.content.owner === activePlayer)
       || (candidate.content?.kind === 'building' && candidate.content.owner === activePlayer)
     ) && areNeighbors(candidate.id, cell.id));
+  }
+
+  if (engineerMode === 'dismantle') {
+    return mode === 'own'
+      && selectedCell !== null
+      && isOwnBuilding(cell, activePlayer)
+      && areNeighbors(selectedCell, cell.id);
   }
 
   if (buildMode) {
@@ -77,7 +91,25 @@ const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode,
       && isInRange(selectedCell, cell.id, ARTILLERY_RANGE);
   }
 
-  return mode === 'own' && areNeighbors(selectedCell, cell.id) && !cell.content;
+  if (!areNeighbors(selectedCell, cell.id)) return false;
+
+  if (selectedContent.type === 'harvester') {
+    return mode === 'own' && (
+      !cell.content
+      || cell.content.kind === 'ruin'
+      || (selectedContent.cargo > 0 && isOwnBuilding(cell, activePlayer) && BUILDINGS[cell.content.type]?.receivesCargo)
+    );
+  }
+
+  if (selectedContent.type === 'engineer' && isOwnBuilding(cell, activePlayer) && cell.content.damaged) {
+    return mode === 'own';
+  }
+
+  if (selectedContent.type === 'saboteur' && mode === 'enemy') {
+    return cell.content?.kind !== 'ruin' && cell.content?.owner !== activePlayer;
+  }
+
+  return mode === 'own' && !cell.content;
 };
 
 export default function GameGrid({
@@ -89,6 +121,7 @@ export default function GameGrid({
   selectedCell,
   buildMode,
   structureMode,
+  engineerMode,
   onCellClick,
 }) {
   const physicalRockets = rockets.filter((rocket) => rocket.status !== 'destroyed' && rocket.status !== 'escaped');
@@ -110,7 +143,7 @@ export default function GameGrid({
       <div className={`grid grid-cols-10 overflow-hidden border-2 ${mode === 'enemy' ? 'border-red-300' : 'border-blue-400'} bg-white/75 shadow-inner`}>
         {grid.map((cell) => {
           const selected = selectedCell === cell.id;
-          const actionable = canActOnCell({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode });
+          const actionable = canActOnCell({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode, engineerMode });
 
           return (
             <Cell

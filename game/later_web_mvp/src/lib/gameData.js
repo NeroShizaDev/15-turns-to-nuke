@@ -10,28 +10,37 @@ export const UNIT_META = {
   infantry: { icon: '♙', label: 'Пехота', kind: 'unit', cost: 10, description: 'Ближний бой, ответный удар пехоты.' },
   scout: { icon: '⌂', label: 'Разведчик', kind: 'unit', cost: 8, description: 'Открывает соседние клетки без выстрела вслепую.' },
   engineer: { icon: '⚙', label: 'Инженер', kind: 'unit', cost: 15, description: 'Строит и чинит поврежденные сегменты зданий.' },
-  saboteur: { icon: '☻', label: 'Диверсант', kind: 'unit', cost: 15, description: 'Скрытый юнит для будущих краж ресурсов.' },
+  saboteur: { icon: '☻', label: 'Диверсант', kind: 'unit', cost: 15, description: 'Крадёт деньги из хранилища вражеского здания.' },
+  harvester: { icon: '⛟', label: 'Сборщик', kind: 'unit', cost: 20, description: 'Вывозит обломки из руин на свой Склад или главную базу.' },
   artillery: { icon: '▣', label: 'Артиллерия', kind: 'unit', cost: 20, range: 4, actionCost: 2, description: 'Слепой выстрел на 4 клетки, затем 4 своих хода перезарядки.' },
   base: { icon: '□', label: 'База', kind: 'building' },
   barracks: { icon: '▤', label: 'Казарма', kind: 'building' },
   hq: { icon: '▦', label: 'Главная база', kind: 'building' },
-  rocketSilo: { icon: '▧', label: 'Ракетная шахта', kind: 'building', cost: 30 },
+  rocketSilo: { icon: '▧', label: 'Ракетная шахта', kind: 'building' },
+  depot: { icon: '▥', label: 'Склад', kind: 'building' },
+  ruin: { icon: '※', label: 'Руины', kind: 'ruin' },
 };
 
+// Экономика «здания — это спайс»: здания дают доход (income), хранят деньги (storage),
+// принимают груз Сборщика (receivesCargo), а разрушенные сегменты становятся руинами с обломками.
 export const BUILDINGS = {
-  // Главная база — «командный центр»: даёт доход и нанимает инженеров-строителей.
+  // Главная база — «командный центр» и переработка: доход, хранилище, инженеры и Сборщики.
   hq: {
     label: UNIT_META.hq.label,
     footprint: { width: 2, height: 2 },
     income: 20,
+    storage: 100,
+    receivesCargo: true,
     cost: 50,
-    hireUnits: ['engineer'],
+    hireUnits: ['engineer', 'harvester'],
   },
   // Казарма — производит боевые юниты.
   barracks: {
     label: UNIT_META.barracks.label,
     footprint: { width: 2, height: 1 },
     income: 0,
+    storage: 10,
+    receivesCargo: false,
     cost: 25,
     hireUnits: ['infantry', 'scout', 'artillery', 'saboteur'],
   },
@@ -39,6 +48,8 @@ export const BUILDINGS = {
     label: UNIT_META.rocketSilo.label,
     footprint: { width: 2, height: 2 },
     income: 0,
+    storage: 0,
+    receivesCargo: false,
     cost: 40,
     hireUnits: [],
   },
@@ -46,6 +57,18 @@ export const BUILDINGS = {
     label: UNIT_META.base.label,
     footprint: { width: 1, height: 1 },
     income: 5,
+    storage: 20,
+    receivesCargo: false,
+    cost: 15,
+    hireUnits: [],
+  },
+  // Склад — силос из Dune: много места и точка выгрузки Сборщика у «месторождения».
+  depot: {
+    label: UNIT_META.depot.label,
+    footprint: { width: 1, height: 1 },
+    income: 0,
+    storage: 60,
+    receivesCargo: true,
     cost: 15,
     hireUnits: [],
   },
@@ -58,16 +81,27 @@ export const UNITS = Object.fromEntries(
 );
 
 export const buildingTypes = Object.keys(BUILDINGS);
-export const HIREABLE_UNITS = ['infantry', 'scout', 'engineer', 'artillery', 'saboteur'];
+export const HIREABLE_UNITS = ['infantry', 'scout', 'engineer', 'harvester', 'artillery', 'saboteur'];
 // Здания, которые инженер может строить на поле.
-export const BUILDABLE_BUILDINGS = ['hq', 'barracks', 'base', 'rocketSilo'];
+export const BUILDABLE_BUILDINGS = ['hq', 'barracks', 'base', 'depot', 'rocketSilo'];
 export const ACTION_POINTS_PER_TURN = 6;
 export const MAX_HIRES_PER_TURN = 2;
 export const ARTILLERY_RANGE = 4;
 export const ARTILLERY_ACTION_COST = 2;
 export const ARTILLERY_COOLDOWN_OWN_TURNS = 4;
 export const SABOTEUR_ACTION_COST = 2;
+export const SABOTEUR_STEAL = 15;
 export const ROCKET_LAUNCH_TURNS = 15;
+
+export const STARTING_MONEY = 60;
+// «Заначка в пенале»: сколько денег можно держать вообще без зданий.
+export const POCKET_STORAGE = 20;
+// Руины хранят полную стоимость разрушенного сегмента.
+export const SALVAGE_RATE = 1;
+export const SELL_REFUND_RATE = 0.5;
+export const SELL_DAMAGED_REFUND_RATE = 0.25;
+export const REPAIR_COST_PER_SEGMENT = 5;
+export const HARVESTER_CAPACITY = 20;
 
 export function getBuildingData(type) {
   const building = BUILDINGS[type];
@@ -81,6 +115,19 @@ export function getBuildingData(type) {
 
 export function getBuildingFootprint(type) {
   return getBuildingData(type).footprint;
+}
+
+export function getSegmentCount(type) {
+  const { width, height } = getBuildingFootprint(type);
+  return width * height;
+}
+
+export function getSegmentStorage(type) {
+  return getBuildingData(type).storage / getSegmentCount(type);
+}
+
+export function getSegmentSalvage(type) {
+  return Math.ceil((getBuildingData(type).cost * SALVAGE_RATE) / getSegmentCount(type));
 }
 
 export const idToCoord = (id) => {

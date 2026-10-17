@@ -7,15 +7,26 @@ import {
   BUILDABLE_BUILDINGS,
   BUILDINGS,
   GRID_SIZE,
+  HARVESTER_CAPACITY,
   HIREABLE_UNITS,
   MAX_HIRES_PER_TURN,
   PLAYERS,
+  POCKET_STORAGE,
+  REPAIR_COST_PER_SEGMENT,
   ROCKET_LAUNCH_TURNS,
+  SABOTEUR_ACTION_COST,
+  SABOTEUR_STEAL,
+  SELL_DAMAGED_REFUND_RATE,
+  SELL_REFUND_RATE,
+  STARTING_MONEY,
   UNIT_META,
   areNeighbors,
   getBuildingData,
   getBuildingFootprint,
   getEnemy,
+  getSegmentCount,
+  getSegmentSalvage,
+  getSegmentStorage,
   idToCoord,
   isInRange,
   makeCell,
@@ -55,7 +66,10 @@ const makeUnit = (type, owner) => ({
   ap: 1,
   cooldown: 0,
   hidden: type === 'saboteur',
+  ...(type === 'harvester' ? { cargo: 0 } : {}),
 });
+
+export const makeRuin = (salvage) => ({ kind: 'ruin', type: 'ruin', owner: null, salvage });
 
 const setKnownContent = (cell, player, content, turn = 1) => ({
   ...cell,
@@ -66,6 +80,17 @@ const revealCellTruthFor = (cell, player, turn) => {
   if (!cell.content) return { ...cell, [`${player}View`]: { state: 'empty', turnDetected: turn } };
   return setKnownContent(cell, player, cell.content, turn);
 };
+
+// Руины и их расчистка видны обоим игрокам: дым от разрушения видно издалека.
+const revealCellToAll = (cell, turn) => PLAYERS.reduce(
+  (nextCell, player) => revealCellTruthFor(nextCell, player, turn),
+  cell,
+);
+
+const setRuinSalvage = (cell, salvage, turn) => revealCellToAll(
+  { ...cell, content: salvage > 0 ? makeRuin(salvage) : null },
+  turn,
+);
 
 export function cellId(x, y) {
   return y * GRID_SIZE + x;
@@ -178,7 +203,7 @@ export function placeBuilding(grid, originId, { type, owner }) {
   return nextGrid;
 }
 
-export function damageOrDestroyBuilding(grid, targetId) {
+export function damageOrDestroyBuilding(grid, targetId, turn = 1) {
   const target = grid[targetId];
 
   if (target?.content?.kind !== 'building') {
@@ -189,7 +214,8 @@ export function damageOrDestroyBuilding(grid, targetId) {
   const segment = nextGrid[targetId].content;
 
   if (segment.damaged) {
-    nextGrid[targetId] = { ...nextGrid[targetId], content: null };
+    // Разрушенный сегмент становится руинами: стоимость здания остаётся на поле обломками.
+    nextGrid[targetId] = setRuinSalvage(nextGrid[targetId], getSegmentSalvage(segment.type), turn);
   } else {
     nextGrid[targetId] = {
       ...nextGrid[targetId],
@@ -258,6 +284,118 @@ export function hasActiveRocketSilo(grid, owner) {
   return hasActiveBuilding(grid, owner, 'rocketSilo');
 }
 
+// Деньги лежат в зданиях, как спайс в силосах Dune: вместимость = заначка + сегменты зданий.
+export function getStorageCapacity(grid, player) {
+  const storage = grid.reduce((total, cell) => {
+    const segment = cell.content;
+    if (segment?.kind !== 'building' || segment.owner !== player) return total;
+    return total + getSegmentStorage(segment.type);
+  }, 0);
+
+  return POCKET_STORAGE + Math.floor(storage);
+}
+
+export function addMoneyWithinStorage(money, amount, capacity) {
+  const gained = Math.max(0, Math.min(amount, capacity - money));
+  return { money: money + gained, gained, lost: amount - gained };
+}
+
+// Если вместимость упала ниже денег, излишек вываливается в руины на ruinCellId.
+export function spillExcessMoney(grid, money, player, ruinCellId, turn = 1) {
+  const excess = Math.max(0, money - getStorageCapacity(grid, player));
+  const cell = grid[ruinCellId];
+
+  if (excess === 0 || (cell.content && cell.content.kind !== 'ruin')) {
+    return { grid, money, spilled: 0 };
+  }
+
+  const nextGrid = cloneGrid(grid);
+  nextGrid[ruinCellId] = setRuinSalvage(nextGrid[ruinCellId], (cell.content?.salvage ?? 0) + excess, turn);
+
+  return { grid: nextGrid, money: money - excess, spilled: excess };
+}
+
+const isCargoReceiverNear = (grid, targetId, owner) => grid.some((cell) => cell.content?.kind === 'building'
+  && cell.content.owner === owner
+  && !cell.content.damaged
+  && BUILDINGS[cell.content.type]?.receivesCargo
+  && areNeighbors(cell.id, targetId));
+
+// Сборщик сам выгружается рядом со своей главной базой или Складом, но только до вместимости.
+export function unloadHarvester(grid, money, harvesterId) {
+  const harvester = grid[harvesterId]?.content;
+
+  if (harvester?.type !== 'harvester' || !harvester.cargo || !isCargoReceiverNear(grid, harvesterId, harvester.owner)) {
+    return { grid, money, unloaded: 0, full: false };
+  }
+
+  const owner = harvester.owner;
+  const { money: ownerMoney, gained } = addMoneyWithinStorage(
+    money[owner],
+    harvester.cargo,
+    getStorageCapacity(grid, owner),
+  );
+
+  if (gained === 0) {
+    return { grid, money, unloaded: 0, full: true };
+  }
+
+  const nextGrid = cloneGrid(grid);
+  nextGrid[harvesterId] = {
+    ...nextGrid[harvesterId],
+    content: { ...harvester, cargo: harvester.cargo - gained },
+  };
+
+  return { grid: nextGrid, money: { ...money, [owner]: ownerMoney }, unloaded: gained, full: false };
+}
+
+// Попадание по сегменту здания: повреждение, либо руины и высыпавшиеся из хранилища деньги.
+const resolveBuildingHit = (grid, money, targetId, turn) => {
+  const segment = grid[targetId].content;
+  let nextGrid = damageOrDestroyBuilding(grid, targetId, turn);
+  let nextMoney = money;
+  let spilled = 0;
+  const destroyed = nextGrid[targetId].content?.kind === 'ruin';
+
+  if (destroyed) {
+    const spill = spillExcessMoney(nextGrid, money[segment.owner], segment.owner, targetId, turn);
+    nextGrid = spill.grid;
+    spilled = spill.spilled;
+    nextMoney = { ...money, [segment.owner]: spill.money };
+  }
+
+  return {
+    grid: nextGrid,
+    money: nextMoney,
+    destroyed,
+    spilled,
+    salvage: destroyed ? nextGrid[targetId].content.salvage : 0,
+    buildingDestroyed: isBuildingDestroyed(nextGrid, segment.buildingId),
+  };
+};
+
+const describeBuildingHit = (label, hit) => {
+  if (!hit.destroyed) return ` ${label}: сегмент поврежден.`;
+
+  let message = ` ${label}: сегмент разрушен, в руинах $${hit.salvage}`;
+  if (hit.spilled > 0) message += ` (из хранилища высыпалось $${hit.spilled})`;
+  message += '.';
+  if (hit.buildingDestroyed) message += ` ${label} уничтожена полностью.`;
+  return message;
+};
+
+// Убирает юнит с клетки уже склонированной сетки; Сборщик с грузом оставляет руины с грузом.
+const removeUnitAt = (grid, id, turn) => {
+  const unit = grid[id].content;
+  const cargo = unit?.type === 'harvester' ? unit.cargo ?? 0 : 0;
+
+  grid[id] = cargo > 0
+    ? setRuinSalvage(grid[id], cargo, turn)
+    : { ...grid[id], content: null };
+
+  return cargo;
+};
+
 const calculateIncome = (grid, player) => {
   const paidBuildingIds = new Set();
 
@@ -278,6 +416,7 @@ const calculateIncome = (grid, player) => {
 
 export function applyIncome(state, player) {
   const income = calculateIncome(state.grid, player);
+  const capacity = getStorageCapacity(state.grid, player);
 
   if (state.players) {
     return {
@@ -286,7 +425,7 @@ export function applyIncome(state, player) {
         ...state.players,
         [player]: {
           ...(state.players[player] ?? { money: 0 }),
-          money: (state.players[player]?.money ?? 0) + income,
+          money: addMoneyWithinStorage(state.players[player]?.money ?? 0, income, capacity).money,
         },
       },
     };
@@ -295,7 +434,7 @@ export function applyIncome(state, player) {
   if (state.money) {
     return {
       ...state,
-      money: { ...state.money, [player]: state.money[player] + income },
+      money: { ...state.money, [player]: addMoneyWithinStorage(state.money[player], income, capacity).money },
     };
   }
 
@@ -562,7 +701,7 @@ export const useGameStore = create((set, get) => ({
   turn: 1,
   phase: 'ACTION',
   activePlayer: 'p1',
-  money: { p1: 60, p2: 60 },
+  money: { p1: STARTING_MONEY, p2: STARTING_MONEY },
   actionPoints: { p1: ACTION_POINTS_PER_TURN, p2: ACTION_POINTS_PER_TURN },
   rocketProgress: { p1: 0, p2: 0 },
   rockets: [],
@@ -570,16 +709,22 @@ export const useGameStore = create((set, get) => ({
   selectedCell: null,
   buildMode: null,
   structureMode: null,
+  engineerMode: null,
   hiredThisTurn: { p1: 0, p2: 0 },
-  log: ['Ход 1: у каждого есть инженер. Постройте Главную базу.'],
+  log: ['Ход 1: у каждого есть инженер. Постройте Главную базу — деньги хранятся в зданиях.'],
   grid: createInitialGrid(),
 
   selectCell: (id, sourceMode = 'own') => {
-    const { grid, selectedCell, activePlayer, actionPoints, phase, buildMode, structureMode } = get();
+    const { grid, selectedCell, activePlayer, actionPoints, phase, buildMode, structureMode, engineerMode } = get();
     if (phase !== 'ACTION' || get().winner) return;
 
     if (structureMode) {
       if (sourceMode === 'own') get().buildStructure(id);
+      return;
+    }
+
+    if (engineerMode === 'dismantle') {
+      if (sourceMode === 'own') get().dismantleBuilding(id);
       return;
     }
 
@@ -607,6 +752,33 @@ export const useGameStore = create((set, get) => ({
       }
 
       if (areNeighbors(selectedCell, id)) {
+        // Сборщик не воюет: грузит обломки, выгружается у своего хранилища или едет.
+        if (selected.content.type === 'harvester') {
+          if (clicked.content?.kind === 'ruin') {
+            get().harvestRuin(id);
+          } else if (clicked.content?.kind === 'building' && clicked.content.owner === activePlayer) {
+            get().unloadCargo();
+          } else if (!clicked.content) {
+            get().moveUnit(selectedCell, id);
+          }
+          return;
+        }
+
+        if (selected.content.type === 'engineer'
+          && clicked.content?.kind === 'building'
+          && clicked.content.owner === activePlayer
+          && clicked.content.damaged) {
+          get().repairBuilding(id);
+          return;
+        }
+
+        if (selected.content.type === 'saboteur'
+          && clicked.content?.kind === 'building'
+          && clicked.content.owner !== activePlayer) {
+          get().sabotage(id);
+          return;
+        }
+
         if (clicked.content && clicked.content.owner !== activePlayer && isTargetRevealed) {
           get().attackTarget(id);
           return;
@@ -637,16 +809,24 @@ export const useGameStore = create((set, get) => ({
     set({ selectedCell: null });
   },
 
-  clearSelection: () => set({ selectedCell: null, buildMode: null, structureMode: null }),
+  clearSelection: () => set({ selectedCell: null, buildMode: null, structureMode: null, engineerMode: null }),
 
   setBuildMode: (unitType) => {
     if (!HIREABLE_UNITS.includes(unitType)) return;
-    set({ buildMode: unitType, selectedCell: null, structureMode: null });
+    set({ buildMode: unitType, selectedCell: null, structureMode: null, engineerMode: null });
   },
 
   setStructureMode: (buildingType) => {
     if (!BUILDABLE_BUILDINGS.includes(buildingType)) return;
-    set({ structureMode: buildingType, buildMode: null });
+    set({ structureMode: buildingType, buildMode: null, engineerMode: null });
+  },
+
+  setEngineerMode: (mode) => {
+    set((state) => ({
+      engineerMode: state.engineerMode === mode ? null : mode,
+      structureMode: null,
+      buildMode: null,
+    }));
   },
 
   hireUnit: (targetId) => {
@@ -669,7 +849,7 @@ export const useGameStore = create((set, get) => ({
       && areNeighbors(cell.id, targetId));
 
     if (targetCell.content || !hasFriendlyRecruiterNear) {
-      set((state) => ({ log: appendLog(state, 'нанимать можно только в пустую соседнюю клетку возле своей казармы.') }));
+      set((state) => ({ log: appendLog(state, `${UNIT_META[buildMode].label}: нанимать можно только в пустую клетку рядом с целым зданием, которое его производит.`) }));
       return;
     }
 
@@ -732,6 +912,191 @@ export const useGameStore = create((set, get) => ({
     }));
   },
 
+  harvestRuin: (targetId) => {
+    const { grid, activePlayer, actionPoints, selectedCell, turn, money } = get();
+    const harvester = selectedCell !== null ? grid[selectedCell]?.content : null;
+
+    if (harvester?.type !== 'harvester' || harvester.owner !== activePlayer) return;
+    if (harvester.ap <= 0 || actionPoints[activePlayer] < 1) {
+      set((state) => ({ log: appendLog(state, 'Сборщику не хватает действия или ОД.') }));
+      return;
+    }
+
+    const ruin = grid[targetId]?.content;
+    if (ruin?.kind !== 'ruin' || !areNeighbors(selectedCell, targetId)) return;
+
+    const space = HARVESTER_CAPACITY - (harvester.cargo ?? 0);
+    if (space <= 0) {
+      set((state) => ({ log: appendLog(state, 'кузов Сборщика полон: вези груз к главной базе или Складу.') }));
+      return;
+    }
+
+    const taken = Math.min(space, ruin.salvage);
+    const left = ruin.salvage - taken;
+    const newGrid = cloneGrid(grid);
+    newGrid[targetId] = setRuinSalvage(newGrid[targetId], left, turn);
+    newGrid[selectedCell] = {
+      ...newGrid[selectedCell],
+      content: { ...harvester, ap: 0, cargo: (harvester.cargo ?? 0) + taken },
+    };
+
+    const unload = unloadHarvester(newGrid, money, selectedCell);
+    let message = `Сборщик погрузил $${taken} обломков на ${idToCoord(targetId)}`;
+    message += left > 0 ? ` (осталось $${left}).` : ' — руины расчищены.';
+    if (unload.unloaded > 0) message += ` Сразу выгружено в хранилище: $${unload.unloaded}.`;
+
+    set((state) => ({
+      grid: unload.grid,
+      money: unload.money,
+      selectedCell: null,
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      log: appendLog(state, message),
+    }));
+  },
+
+  unloadCargo: () => {
+    const { grid, money, selectedCell } = get();
+    const result = unloadHarvester(grid, money, selectedCell);
+
+    if (result.unloaded === 0) {
+      const reason = result.full
+        ? 'хранилища полны: построй Склад или потрать деньги.'
+        : 'выгрузка только рядом со своей целой главной базой или Складом, и только если в кузове что-то есть.';
+      set((state) => ({ log: appendLog(state, reason) }));
+      return;
+    }
+
+    set((state) => ({
+      grid: result.grid,
+      money: result.money,
+      selectedCell: null,
+      log: appendLog(state, `Сборщик выгрузил $${result.unloaded} в хранилище.`),
+    }));
+  },
+
+  dismantleBuilding: (targetId) => {
+    const { grid, activePlayer, actionPoints, selectedCell, money, turn } = get();
+    const engineer = selectedCell !== null ? grid[selectedCell]?.content : null;
+    const target = grid[targetId]?.content;
+
+    if (engineer?.type !== 'engineer' || engineer.owner !== activePlayer) {
+      set((state) => ({ log: appendLog(state, 'для разборки выбери своего инженера.') }));
+      return;
+    }
+    if (engineer.ap <= 0 || actionPoints[activePlayer] < 1) {
+      set((state) => ({ log: appendLog(state, 'инженеру не хватает действия или ОД на разборку.') }));
+      return;
+    }
+    if (target?.kind !== 'building' || target.owner !== activePlayer || !areNeighbors(selectedCell, targetId)) {
+      set((state) => ({ log: appendLog(state, 'разобрать можно только своё здание рядом с инженером.') }));
+      return;
+    }
+
+    const segments = getBuildingSegments(grid, target.buildingId);
+    const segmentCost = getBuildingData(target.type).cost / getSegmentCount(target.type);
+    const refund = Math.floor(segments.reduce(
+      (sum, cell) => sum + segmentCost * (cell.content.damaged ? SELL_DAMAGED_REFUND_RATE : SELL_REFUND_RATE),
+      0,
+    ));
+
+    const newGrid = cloneGrid(grid);
+    segments.forEach((cell) => {
+      newGrid[cell.id] = {
+        ...newGrid[cell.id],
+        content: null,
+        [`${activePlayer}View`]: { state: 'empty', turnDetected: turn },
+      };
+    });
+    newGrid[selectedCell] = { ...newGrid[selectedCell], content: { ...engineer, ap: 0 } };
+
+    // Возврат кладём в кошелёк; что не влезло в оставшиеся хранилища — остаётся кучей на месте здания.
+    const spill = spillExcessMoney(newGrid, money[activePlayer] + refund, activePlayer, targetId, turn);
+    const label = BUILDINGS[target.type].label;
+    let message = `${playerName(activePlayer)} разобрал ${label} и вернул $${refund}.`;
+    if (spill.spilled > 0) message += ` Не влезло в хранилища: $${spill.spilled} лежат руинами на ${idToCoord(targetId)}.`;
+
+    set((state) => ({
+      grid: spill.grid,
+      money: { ...state.money, [activePlayer]: spill.money },
+      selectedCell: null,
+      engineerMode: null,
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      log: appendLog(state, message),
+    }));
+  },
+
+  repairBuilding: (targetId) => {
+    const { grid, activePlayer, actionPoints, selectedCell, money } = get();
+    const engineer = selectedCell !== null ? grid[selectedCell]?.content : null;
+    const target = grid[targetId]?.content;
+
+    if (engineer?.type !== 'engineer' || engineer.owner !== activePlayer) return;
+    if (target?.kind !== 'building' || target.owner !== activePlayer || !target.damaged) return;
+    if (engineer.ap <= 0 || actionPoints[activePlayer] < 1) {
+      set((state) => ({ log: appendLog(state, 'инженеру не хватает действия или ОД на ремонт.') }));
+      return;
+    }
+    if (money[activePlayer] < REPAIR_COST_PER_SEGMENT) {
+      set((state) => ({ log: appendLog(state, `ремонт сегмента стоит $${REPAIR_COST_PER_SEGMENT}.`) }));
+      return;
+    }
+
+    const newGrid = engineerRepair(grid, targetId, activePlayer);
+    newGrid[selectedCell] = { ...newGrid[selectedCell], content: { ...engineer, ap: 0 } };
+
+    set((state) => ({
+      grid: newGrid,
+      selectedCell: null,
+      money: { ...state.money, [activePlayer]: state.money[activePlayer] - REPAIR_COST_PER_SEGMENT },
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
+      log: appendLog(state, `Инженер починил ${BUILDINGS[target.type].label} на ${idToCoord(targetId)} за $${REPAIR_COST_PER_SEGMENT}.`),
+    }));
+  },
+
+  sabotage: (targetId) => {
+    const { grid, activePlayer, actionPoints, selectedCell, money, turn } = get();
+    const saboteur = selectedCell !== null ? grid[selectedCell]?.content : null;
+    const target = grid[targetId]?.content;
+
+    if (saboteur?.type !== 'saboteur' || saboteur.owner !== activePlayer) return;
+    if (target?.kind !== 'building' || target.owner === activePlayer || !areNeighbors(selectedCell, targetId)) return;
+    if (saboteur.ap <= 0 || actionPoints[activePlayer] < SABOTEUR_ACTION_COST) {
+      set((state) => ({ log: appendLog(state, `кража стоит ${SABOTEUR_ACTION_COST} ОД и действие диверсанта.`) }));
+      return;
+    }
+
+    const victim = target.owner;
+    const stolen = Math.min(SABOTEUR_STEAL, money[victim]);
+    const { money: ownMoney, lost } = addMoneyWithinStorage(
+      money[activePlayer],
+      stolen,
+      getStorageCapacity(grid, activePlayer),
+    );
+
+    const newGrid = cloneGrid(grid);
+    newGrid[targetId] = revealCellTruthFor(newGrid[targetId], activePlayer, turn);
+    // После кражи жертва замечает вора — дальше он оставляет призрачный след.
+    newGrid[selectedCell] = {
+      ...newGrid[selectedCell],
+      content: { ...saboteur, ap: 0 },
+      [`${victim}View`]: { state: 'unit', type: 'saboteur', turnDetected: turn },
+    };
+
+    const label = BUILDINGS[target.type].label;
+    let message = stolen > 0
+      ? `Диверсант вскрыл хранилище (${label}) на ${idToCoord(targetId)} и унёс $${stolen}.`
+      : `Диверсант пробрался в ${label} на ${idToCoord(targetId)}, но хранилище пустое.`;
+    if (lost > 0) message += ` $${lost} не влезло в свои хранилища и брошено.`;
+
+    set((state) => ({
+      grid: newGrid,
+      selectedCell: null,
+      money: { ...state.money, [activePlayer]: ownMoney, [victim]: state.money[victim] - stolen },
+      actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - SABOTEUR_ACTION_COST },
+      log: appendLog(state, message),
+    }));
+  },
+
   revealCell: (id) => {
     const { activePlayer, grid, actionPoints, selectedCell, turn } = get();
     const scoutCell = selectedCell !== null ? grid[selectedCell] : null;
@@ -790,16 +1155,22 @@ export const useGameStore = create((set, get) => ({
       [ownerView]: { state: 'unit', type: unit.type, turnDetected: get().turn },
     };
 
+    const unload = unloadHarvester(newGrid, get().money, toId);
+    let message = `${playerName(activePlayer)} двинул ${UNIT_META[unit.type].label} ${idToCoord(fromId)} -> ${idToCoord(toId)}.`;
+    if (unload.unloaded > 0) message += ` Сборщик выгрузил $${unload.unloaded}.`;
+    if (unload.full) message += ' Хранилища полны — груз остался в кузове.';
+
     set((state) => ({
-      grid: newGrid,
+      grid: unload.grid,
+      money: unload.money,
       selectedCell: null,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
-      log: appendLog(state, `${playerName(activePlayer)} двинул ${UNIT_META[unit.type].label} ${idToCoord(fromId)} -> ${idToCoord(toId)}.`),
+      log: appendLog(state, message),
     }));
   },
 
   attackTarget: (targetId) => {
-    const { grid, activePlayer, actionPoints, selectedCell, turn } = get();
+    const { grid, activePlayer, actionPoints, selectedCell, turn, money } = get();
     const attackerCell = selectedCell !== null ? grid[selectedCell] : null;
     const targetCell = grid[targetId];
 
@@ -812,36 +1183,37 @@ export const useGameStore = create((set, get) => ({
     if (targetViewState !== 'unit' && targetViewState !== 'building') return;
 
     let newGrid = cloneGrid(grid);
+    let nextMoney = money;
     const attackerType = attackerCell.content.type;
     const targetType = targetCell.content.type;
     const isCounterAttackPossible = targetCell.content.type === 'infantry';
     let message = `${UNIT_META[attackerType].label} атаковал ${UNIT_META[targetType].label} на ${idToCoord(targetId)}.`;
 
     if (targetCell.content.kind === 'unit') {
-      newGrid[targetId].content = null;
-      newGrid[targetId][`${activePlayer}View`] = { state: 'empty', turnDetected: turn };
+      const droppedCargo = removeUnitAt(newGrid, targetId, turn);
+      if (droppedCargo === 0) newGrid[targetId][`${activePlayer}View`] = { state: 'empty', turnDetected: turn };
       message = `${UNIT_META[attackerType].label} уничтожил ${UNIT_META[targetType].label} на ${idToCoord(targetId)}.`;
+      if (droppedCargo > 0) message += ` Груз $${droppedCargo} рассыпался руинами.`;
 
       if (isCounterAttackPossible) {
-        newGrid[selectedCell].content = null;
+        removeUnitAt(newGrid, selectedCell, turn);
         newGrid[selectedCell][`${getEnemy(activePlayer)}View`] = { state: 'empty', turnDetected: turn };
         message += ' Ответный удар: атакующий тоже погиб.';
       }
     } else {
-      const buildingId = targetCell.content.buildingId;
-      newGrid = damageOrDestroyBuilding(newGrid, targetId);
+      const hit = resolveBuildingHit(newGrid, money, targetId, turn);
+      newGrid = hit.grid;
+      nextMoney = hit.money;
       newGrid[targetId] = revealCellTruthFor(newGrid[targetId], activePlayer, turn);
-      message += newGrid[targetId].content ? ' Сегмент здания поврежден.' : ' Сегмент здания разрушен.';
-      if (isBuildingDestroyed(newGrid, buildingId)) {
-        message += ` ${UNIT_META[targetType].label} уничтожена полностью.`;
-      }
+      message += describeBuildingHit(UNIT_META[targetType].label, hit);
     }
 
-    if (newGrid[selectedCell].content) newGrid[selectedCell].content.ap = 0;
+    if (newGrid[selectedCell].content?.kind === 'unit') newGrid[selectedCell].content.ap = 0;
     const baseResult = checkBaseWinCondition(newGrid);
 
     set((state) => ({
       grid: newGrid,
+      money: nextMoney,
       selectedCell: null,
       winner: baseResult?.winner ?? state.winner,
       actionPoints: { ...state.actionPoints, [activePlayer]: state.actionPoints[activePlayer] - 1 },
@@ -852,7 +1224,7 @@ export const useGameStore = create((set, get) => ({
   },
 
   artilleryFire: (targetId) => {
-    const { grid, activePlayer, actionPoints, selectedCell, turn, rockets } = get();
+    const { grid, activePlayer, actionPoints, selectedCell, turn, rockets, money } = get();
     const artilleryCell = selectedCell !== null ? grid[selectedCell] : null;
     const targetCell = grid[targetId];
 
@@ -866,6 +1238,7 @@ export const useGameStore = create((set, get) => ({
     if (targetCell.content?.owner === activePlayer) return;
 
     let newGrid = cloneGrid(grid);
+    let nextMoney = money;
     let nextRockets = rockets;
     let message = `Артиллерия дала слепой залп по ${idToCoord(targetId)}.`;
     const rocketContent = getRocketContent(rockets, targetId);
@@ -885,19 +1258,24 @@ export const useGameStore = create((set, get) => ({
       message += ' Промах: клетка была пустой.';
     } else if (targetCell.content.kind === 'unit') {
       message += ` Попадание: уничтожен ${UNIT_META[targetCell.content.type].label}.`;
-      newGrid[targetId].content = null;
-      newGrid[targetId][`${activePlayer}View`] = { state: 'empty', turnDetected: turn };
-    } else {
-      const targetType = targetCell.content.type;
-      const buildingId = targetCell.content.buildingId;
-      newGrid = damageOrDestroyBuilding(newGrid, targetId);
-      newGrid[targetId] = revealCellTruthFor(newGrid[targetId], activePlayer, turn);
-      message += newGrid[targetId].content
-        ? ` Попадание по зданию ${UNIT_META[targetType].label}: сегмент поврежден.`
-        : ` Попадание: сегмент здания ${UNIT_META[targetType].label} разрушен.`;
-      if (isBuildingDestroyed(newGrid, buildingId)) {
-        message += ` ${UNIT_META[targetType].label} уничтожена полностью.`;
+      const droppedCargo = removeUnitAt(newGrid, targetId, turn);
+      if (droppedCargo > 0) {
+        message += ` Груз $${droppedCargo} рассыпался руинами.`;
+      } else {
+        newGrid[targetId][`${activePlayer}View`] = { state: 'empty', turnDetected: turn };
       }
+    } else if (targetCell.content.kind === 'ruin') {
+      // Обстрел руин разбрасывает обломки, чтобы противник не вывез твоё добро.
+      const scattered = Math.ceil(targetCell.content.salvage / 2);
+      const left = targetCell.content.salvage - scattered;
+      newGrid[targetId] = setRuinSalvage(newGrid[targetId], left, turn);
+      message += ` Залп по руинам: разлетелось $${scattered} обломков${left > 0 ? `, осталось $${left}` : ', руины стёрты'}.`;
+    } else {
+      const hit = resolveBuildingHit(newGrid, money, targetId, turn);
+      newGrid = hit.grid;
+      nextMoney = hit.money;
+      newGrid[targetId] = revealCellTruthFor(newGrid[targetId], activePlayer, turn);
+      message += ` Попадание по зданию —${describeBuildingHit(UNIT_META[targetCell.content.type].label, hit)}`;
     }
 
     newGrid[selectedCell].content.ap = 0;
@@ -906,6 +1284,7 @@ export const useGameStore = create((set, get) => ({
 
     set((state) => ({
       grid: newGrid,
+      money: nextMoney,
       rockets: nextRockets,
       selectedCell: null,
       winner: baseResult?.winner ?? state.winner,
@@ -978,6 +1357,8 @@ export const useGameStore = create((set, get) => ({
         activePlayer: nextPlayer,
         selectedCell: null,
         buildMode: null,
+        structureMode: null,
+        engineerMode: null,
         phase: 'TRANSITION',
         actionPoints: { ...state.actionPoints, [nextPlayer]: ACTION_POINTS_PER_TURN },
         hiredThisTurn: { ...state.hiredThisTurn, [nextPlayer]: 0 },
@@ -996,14 +1377,34 @@ export const useGameStore = create((set, get) => ({
   startActionPhase: () => set((state) => ({ phase: state.winner ? 'ACTION' : 'ACTION' })),
 
   applyIncome: (player = get().activePlayer) => {
-    const { grid, winner } = get();
+    const { grid, winner, money } = get();
     if (winner) return;
 
     const income = calculateIncome(grid, player);
+    const capacity = getStorageCapacity(grid, player);
+    const { money: playerMoney, gained, lost } = addMoneyWithinStorage(money[player], income, capacity);
+    let nextGrid = grid;
+    let nextMoney = { ...money, [player]: playerMoney };
+    let unloaded = 0;
+
+    // Сборщики, стоящие у своего хранилища, выгружаются в начале хода.
+    grid.forEach((cell) => {
+      if (cell.content?.type !== 'harvester' || cell.content.owner !== player) return;
+      const result = unloadHarvester(nextGrid, nextMoney, cell.id);
+      nextGrid = result.grid;
+      nextMoney = result.money;
+      unloaded += result.unloaded;
+    });
+
+    const parts = [];
+    if (income > 0) parts.push(`${playerName(player)} получил $${gained} с баз`);
+    if (lost > 0) parts.push(`$${lost} сгорело — хранилища полны (${capacity})`);
+    if (unloaded > 0) parts.push(`Сборщики выгрузили $${unloaded}`);
 
     set((state) => ({
-      money: { ...state.money, [player]: state.money[player] + income },
-      log: income > 0 ? appendLog(state, `${playerName(player)} получил $${income} с баз.`) : state.log,
+      grid: nextGrid,
+      money: nextMoney,
+      log: parts.length > 0 ? appendLog(state, `${parts.join('; ')}.`) : state.log,
     }));
   },
 }));
