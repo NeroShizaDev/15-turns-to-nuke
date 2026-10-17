@@ -1,162 +1,137 @@
-import { ARTILLERY_RANGE, BUILDINGS, areNeighbors, isInRange } from '../lib/gameData.js';
-import { getRocketContent } from '../store/useGameStore.js';
+import { BUILDINGS, HARVESTER_CAPACITY, UNIT_META } from '../lib/gameData.js';
+import { rocketCells } from '../lib/rules.js';
+import { MISSED_SPRITE, SPRITES } from '../lib/sprites.js';
 import Cell from './Cell.jsx';
 
-const getDisplay = (cell, activePlayer, mode, rockets) => {
-  const rocketContent = getRocketContent(rockets, cell.id);
-  if (rocketContent) {
+// Кусок рисунка здания для одной клетки: ГБ 2×2 и Казарма 2×1 нарисованы целиком.
+const buildingSprite = (type, segmentIndex) => {
+  if (!SPRITES[type]) return null;
+  const { width, height } = BUILDINGS[type].footprint;
+  return {
+    src: SPRITES[type],
+    width,
+    height,
+    dx: segmentIndex % width,
+    dy: Math.floor(segmentIndex / width),
+  };
+};
+
+const unitSprite = (type, extra = {}) => (SPRITES[type] ? { src: SPRITES[type], ...extra } : null);
+
+const rocketCellAt = (rockets, cellId) => {
+  for (const rocket of rockets) {
+    if (rocket.status !== 'flying') continue;
+    const segment = rocketCells(rocket).find((rocketCell) => rocketCell.id === cellId);
+    if (segment) return segment;
+  }
+  return null;
+};
+
+const rocketView = (segment) => ({
+  tone: 'rocket',
+  icon: segment.hit ? '✕' : '▲',
+  label: segment.hit ? 'Ракета, клетка подбита' : 'Ядерная ракета',
+});
+
+// Своя карта: реальные клетки + следы вражеских выстрелов.
+const ownView = (cell, rockets) => {
+  const segment = rocketCellAt(rockets, cell.id);
+  if (segment) return rocketView(segment);
+
+  const shotMark = cell.shot === 'hit' ? '✕' : cell.shot === 'miss' ? '•' : null;
+  const { content } = cell;
+
+  if (!content) {
+    return { tone: 'empty', icon: '', topRight: shotMark, topRightClass: 'text-red-400', label: shotMark ? 'сюда стрелял противник' : '' };
+  }
+
+  if (content.kind === 'ruin') {
     return {
-      state: rocketContent.owner === activePlayer ? 'own' : 'enemy',
-      content: rocketContent,
+      tone: 'ruin',
+      icon: '※',
+      bottomLeft: `$${content.salvage}`,
+      topRight: shotMark,
+      label: `Руины${content.from ? ` (${BUILDINGS[content.from.type].label})` : ''}, обломков на $${content.salvage}`,
     };
   }
 
-  // Руины нейтральные и видны обоим игрокам на обеих картах.
-  if (cell.content?.kind === 'ruin') {
-    return { state: 'ruin', content: cell.content };
+  // Все клетки здания рисуются одинаково: здание стоит целиком, а не «достраивается».
+  if (content.kind === 'building') {
+    return {
+      tone: 'building',
+      icon: UNIT_META[content.type].icon,
+      sprite: buildingSprite(content.type, content.segmentIndex),
+      label: `${BUILDINGS[content.type].label} — клик откроет меню здания`,
+    };
   }
 
-  const ownContent = cell.content?.owner === activePlayer ? cell.content : null;
-
-  if (mode === 'own') {
-    return ownContent
-      ? { state: 'own', content: ownContent }
-      : { state: 'empty', content: null };
-  }
-
-  // На карте противника не показываем свои же фигуры — иначе они «протекают» красным.
-  if (cell.content?.owner === activePlayer) {
-    return { state: 'empty', content: null };
-  }
-
-  const view = cell[`${activePlayer}View`];
-
-  if (view.state === 'unit' || view.state === 'building') {
-    return { state: 'enemy', content: { type: view.type }, turnDetected: view.turnDetected };
-  }
-  if (view.state === 'ghost') {
-    return { state: 'ghost', content: view.lastType, turnDetected: view.lastTurn };
-  }
-  if (view.state === 'empty') {
-    return { state: 'empty', content: null, turnDetected: view.turnDetected };
-  }
-
-  return { state: 'unknown', content: null };
+  const meta = UNIT_META[content.type];
+  const spent = content.ap === 0 || (content.cooldown ?? 0) > 0;
+  return {
+    tone: 'own',
+    icon: meta.icon,
+    sprite: unitSprite(content.type),
+    faded: spent,
+    topLeft: content.cooldown > 0 ? `CD${content.cooldown}` : null,
+    bottomLeft: content.type === 'harvester' && content.cargo > 0 ? `${content.cargo}/${HARVESTER_CAPACITY}` : null,
+    label: `${meta.label}${content.type === 'harvester' ? `, груз $${content.cargo ?? 0}` : ''}${spent ? ' (уже действовал)' : ''}`,
+  };
 };
 
-const canRecruitFrom = (cell, activePlayer, unitType) => {
-  const building = cell.content;
+// Карта противника: только то, что ты узнал разведкой и выстрелами.
+const enemyView = (cell, rockets) => {
+  const segment = rocketCellAt(rockets, cell.id);
+  if (segment) return rocketView(segment);
 
-  return building?.kind === 'building'
-    && building.owner === activePlayer
-    && !building.damaged
-    && Boolean(BUILDINGS[building.type]?.hireUnits.includes(unitType));
-};
+  const { seen } = cell;
+  const typeLabel = seen.type ? (UNIT_META[seen.type]?.label ?? '') : '';
 
-const isOwnBuilding = (cell, activePlayer) => cell.content?.kind === 'building' && cell.content.owner === activePlayer;
-
-const canActOnCell = ({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode, engineerMode }) => {
-  if (structureMode) {
-    if (mode !== 'own' || cell.content) return false;
-    return grid.some((candidate) => (
-      (candidate.content?.type === 'engineer' && candidate.content.owner === activePlayer)
-      || (candidate.content?.kind === 'building' && candidate.content.owner === activePlayer)
-    ) && areNeighbors(candidate.id, cell.id));
+  switch (seen.state) {
+    case 'unit':
+    case 'building':
+      return { tone: 'enemy', icon: UNIT_META[seen.type].icon, sprite: unitSprite(seen.type, { enemy: true }), topLeft: seen.turn, label: `${typeLabel} (видели на ходу ${seen.turn})` };
+    case 'ghost':
+      return { tone: 'ghost', icon: UNIT_META[seen.type].icon, sprite: unitSprite(seen.type), faded: true, topLeft: seen.turn, label: `${typeLabel} был тут на ходу ${seen.turn}` };
+    case 'ruin':
+      return { tone: 'hit', icon: '✕', topLeft: seen.turn, label: `попадание${typeLabel ? `: ${typeLabel}` : ''}` };
+    case 'empty':
+      if (seen.shot === 'kill') return { tone: 'hit', icon: '✕', topLeft: seen.turn, label: `убит ${typeLabel}` };
+      if (seen.shot === 'miss') return { tone: 'miss', icon: '•', sprite: { src: MISSED_SPRITE }, faded: true, topLeft: seen.turn, topLeftClass: 'text-blue-300', label: `мимо (ход ${seen.turn}) — с тех пор могли отстроиться` };
+      return { tone: 'miss', icon: '·', topLeft: seen.turn, topLeftClass: 'text-blue-300', label: `пусто на ходу ${seen.turn}` };
+    default:
+      return { tone: 'unknown', icon: '', label: 'не разведано' };
   }
-
-  if (engineerMode === 'dismantle') {
-    return mode === 'own'
-      && selectedCell !== null
-      && isOwnBuilding(cell, activePlayer)
-      && areNeighbors(selectedCell, cell.id);
-  }
-
-  if (buildMode) {
-    if (mode !== 'own') return false;
-    const hasRecruiterNear = grid.some((candidate) => canRecruitFrom(candidate, activePlayer, buildMode)
-      && areNeighbors(candidate.id, cell.id));
-    return !cell.content && hasRecruiterNear;
-  }
-
-  if (selectedCell === null) return false;
-
-  const selectedContent = grid[selectedCell]?.content;
-  if (!selectedContent) return false;
-
-  if (selectedContent.type === 'artillery') {
-    const isOwnUnit = cell.content?.owner === activePlayer;
-    return mode === 'enemy'
-      && selectedCell !== cell.id
-      && !isOwnUnit
-      && isInRange(selectedCell, cell.id, ARTILLERY_RANGE);
-  }
-
-  if (!areNeighbors(selectedCell, cell.id)) return false;
-
-  if (selectedContent.type === 'harvester') {
-    return mode === 'own' && (
-      !cell.content
-      || cell.content.kind === 'ruin'
-      || (selectedContent.cargo > 0 && isOwnBuilding(cell, activePlayer) && BUILDINGS[cell.content.type]?.receivesCargo)
-    );
-  }
-
-  if (selectedContent.type === 'engineer' && isOwnBuilding(cell, activePlayer) && cell.content.damaged) {
-    return mode === 'own';
-  }
-
-  if (selectedContent.type === 'saboteur' && mode === 'enemy') {
-    return cell.content?.kind !== 'ruin' && cell.content?.owner !== activePlayer;
-  }
-
-  return mode === 'own' && !cell.content;
 };
 
 export default function GameGrid({
   title,
   mode,
-  grid,
-  rockets = [],
-  activePlayer,
-  selectedCell,
-  buildMode,
-  structureMode,
-  engineerMode,
+  board,
+  rockets,
+  selectedIds,
+  aimCell,
+  highlights,
   onCellClick,
 }) {
-  const physicalRockets = rockets.filter((rocket) => rocket.status !== 'destroyed' && rocket.status !== 'escaped');
+  const getView = mode === 'own' ? ownView : enemyView;
 
   return (
     <section>
       <h3 className="mb-2 text-center text-xs font-bold uppercase tracking-[0.35em] text-blue-950">
         {title}
       </h3>
-      {physicalRockets.length > 0 && (
-        <div className="mb-2 space-y-1 text-[0.65rem] uppercase text-red-700">
-          {physicalRockets.map((rocket) => (
-            <p key={rocket.rocketId}>
-              {rocket.rocketId}: {rocket.direction} @ {rocket.cells.join(', ')}
-            </p>
-          ))}
-        </div>
-      )}
       <div className={`grid grid-cols-10 overflow-hidden border-2 ${mode === 'enemy' ? 'border-red-300' : 'border-blue-400'} bg-white/75 shadow-inner`}>
-        {grid.map((cell) => {
-          const selected = selectedCell === cell.id;
-          const actionable = canActOnCell({ mode, cell, grid, activePlayer, selectedCell, buildMode, structureMode, engineerMode });
-
-          return (
-            <Cell
-              key={`${mode}-${cell.id}`}
-              cell={cell}
-              display={getDisplay(cell, activePlayer, mode, rockets)}
-              selected={selected}
-              actionable={actionable}
-              onClick={(id) => onCellClick(id, mode)}
-              activePlayer={activePlayer}
-            />
-          );
-        })}
+        {board.map((cell) => (
+          <Cell
+            key={`${mode}-${cell.id}`}
+            cell={cell}
+            view={getView(cell, rockets)}
+            selected={mode === 'own' && selectedIds.has(cell.id)}
+            aimed={mode === 'enemy' && aimCell === cell.id}
+            actionable={highlights.has(cell.id)}
+            onClick={onCellClick}
+          />
+        ))}
       </div>
     </section>
   );

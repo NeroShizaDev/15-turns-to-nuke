@@ -44,4 +44,4 @@
 
 ## Текущий статус
 
-Есть бумажный дизайн-док v0.1 и React Web MVP в [`game/later_web_mvp`](game/later_web_mvp). Численные изменения Web MVP нужно сверять с [`docs/balance_web_mvp.md`](docs/balance_web_mvp.md).
+Есть бумажный дизайн-док v0.1 и React Web MVP в [`game/later_web_mvp`](game/later_web_mvp): морской бой против ИИ с базами и юнитами, без хитпоинтов — одно попадание сносит одну клетку. Численные изменения Web MVP нужно сверять с [`docs/balance_web_mvp.md`](docs/balance_web_mvp.md).
